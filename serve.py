@@ -10,10 +10,14 @@
 ArcGIS 的 URL 是 ``{z}/{y}/{x}`` 顺序，Plotly 的 raster layer 只接受
 ``{z}/{x}/{y}``。代理同时解决这两个问题。
 
+Google / OSM 在部分网络（尤其大陆）无法直连，因此这两个源可走本机代理；
+代理地址默认从环境变量或 Windows 系统代理设置（含 PAC）自动检测。
+
 用法::
 
     python serve.py                # http://localhost:8000/
     python serve.py --port 9000 --open
+    python serve.py --proxy http://127.0.0.1:1080
 """
 
 from __future__ import annotations
@@ -21,6 +25,8 @@ from __future__ import annotations
 import argparse
 import http.server
 import mimetypes
+import os
+import re
 import socket
 import sys
 import threading
@@ -50,6 +56,17 @@ TILE_SOURCES: dict[str, tuple[str, str]] = {
         "https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}",
         ".jpg",
     ),
+    # Google 的 lyrs=s 为卫星影像（与 Google Earth 同源），lyrs=m 为街道图。
+    # gl=cn 让大陆区域返回 GCJ-02 瓦片，前端同样会做纠偏。
+    # 这是 Google 未公开的瓦片接口，能否连通取决于本机网络环境。
+    "google-satellite": (
+        "https://mt1.google.com/vt/lyrs=s&hl=zh-CN&gl=cn&x={x}&y={y}&z={z}",
+        ".jpg",
+    ),
+    "google-street": (
+        "https://mt1.google.com/vt/lyrs=m&hl=zh-CN&gl=cn&x={x}&y={y}&z={z}",
+        ".png",
+    ),
     "osm": ("https://tile.openstreetmap.org/{z}/{x}/{y}.png", ".png"),
 }
 
@@ -72,6 +89,103 @@ USER_AGENT = (
 )
 
 _CACHE_LOCK = threading.Lock()
+
+# 这些瓦片源在部分网络（尤其大陆）无法直连，只有它们走代理；
+# ArcGIS / 高德仍走直连，避免无谓地绕一圈。
+PROXY_TILE_SOURCES = frozenset({"google-satellite", "google-street", "osm"})
+
+# 由 configure_proxy() 设置，例如 http://127.0.0.1:1080
+PROXY_URL: str | None = None
+_PROXY_OPENER: urllib.request.OpenerDirector | None = None
+# 显式忽略系统/环境变量代理，供 --no-proxy 或不需代理的源使用
+_DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def normalize_proxy(value: str | None) -> str | None:
+    """把代理地址规范成 http(s)://host:port；不支持 socks（urllib 无法直接使用）。"""
+    if not value:
+        return None
+    value = value.strip().rstrip("/")
+    if not value:
+        return None
+    if "://" not in value:
+        value = f"http://{value}"
+    if value.split("://", 1)[0].lower() not in ("http", "https"):
+        return None
+    return value
+
+
+def proxy_from_env() -> str | None:
+    """读取常见的代理环境变量（大小写都支持）。"""
+    for name in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
+                 "ALL_PROXY", "all_proxy"):
+        proxy = normalize_proxy(os.environ.get(name))
+        if proxy:
+            return proxy
+    return None
+
+
+def proxy_from_windows() -> str | None:
+    """读取 Windows Internet 设置中的固定代理或 PAC。"""
+    if sys.platform != "win32":
+        return None
+    try:
+        import winreg
+    except ImportError:
+        return None
+
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+        ) as key:
+            def read(name: str) -> str:
+                try:
+                    return str(winreg.QueryValueEx(key, name)[0])
+                except OSError:
+                    return ""
+
+            enabled = read("ProxyEnable") == "1"
+            server = read("ProxyServer")
+            pac_url = read("AutoConfigURL")
+    except OSError:
+        return None
+
+    if enabled and server:
+        # ProxyServer 可能是 "host:port"，也可能是 "http=host:port;https=host:port"
+        for part in server.split(";"):
+            proxy = normalize_proxy(part.split("=", 1)[-1])
+            if proxy:
+                return proxy
+
+    if pac_url:
+        try:
+            # PAC 一般在本机，强制直连，避免再绕代理
+            with _DIRECT_OPENER.open(pac_url, timeout=3) as response:
+                text = response.read(200_000).decode("utf-8", "replace")
+        except (urllib.error.URLError, OSError, TimeoutError):
+            return None
+        match = re.search(r"PROXY\s+([^\s;\"]+)", text)
+        if match:
+            return normalize_proxy(match.group(1))
+    return None
+
+
+def configure_proxy(proxy: str | None) -> None:
+    """配置代理；proxy 为 None 时，需要代理的源也走直连。"""
+    global PROXY_URL, _PROXY_OPENER
+    PROXY_URL = normalize_proxy(proxy)
+    _PROXY_OPENER = None
+    if PROXY_URL:
+        handler = urllib.request.ProxyHandler({"http": PROXY_URL, "https": PROXY_URL})
+        _PROXY_OPENER = urllib.request.build_opener(handler)
+
+
+def tile_opener(source: str) -> urllib.request.OpenerDirector | None:
+    """Google / OSM 返回显式 opener（代理或强制直连），其余返回 None 走默认逻辑。"""
+    if source in PROXY_TILE_SOURCES:
+        return _PROXY_OPENER or _DIRECT_OPENER
+    return None
 
 
 def sniff_image_type(data: bytes) -> str | None:
@@ -180,9 +294,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         url = template.format(z=z, x=x, y=y)
+        request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        opener = tile_opener(source)
         try:
-            request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-            with urllib.request.urlopen(request, timeout=15) as response:
+            if opener is not None:
+                response = opener.open(request, timeout=15)
+            else:
+                response = urllib.request.urlopen(request, timeout=15)
+            with response:
                 data = response.read()
         except (urllib.error.URLError, TimeoutError, OSError) as error:
             print(f"[tile] 失败 {source} {z}/{x}/{y}: {error}", file=sys.stderr)
@@ -248,14 +367,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 class ThreadingServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
-    allow_reuse_address = True
+    # Windows 的 SO_REUSEADDR 允许两个进程绑定同一端口，旧进程还在服务时
+    # 新进程会“假启动”并继续让旧进程响应请求，因此 Windows 上改用独占绑定。
+    allow_reuse_address = os.name != "nt"
 
 
 def pick_port(host: str, preferred: int, attempts: int = 20) -> int:
     for offset in range(attempts):
         port = preferred + offset
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            # Windows 上不能带 SO_REUSEADDR，否则占用中的端口也会探测成功
+            if os.name != "nt":
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 probe.bind((host, port))
             except OSError:
@@ -269,7 +392,28 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--open", action="store_true", help="启动后自动打开浏览器")
+    parser.add_argument(
+        "--proxy",
+        metavar="URL",
+        help="访问 Google / OSM 瓦片使用的 HTTP 代理，例如 http://127.0.0.1:1080；"
+             "默认自动读取环境变量或 Windows 系统代理（含 PAC）",
+    )
+    parser.add_argument(
+        "--no-proxy",
+        action="store_true",
+        help="禁用自动检测到的代理（Google / OSM 将直连）",
+    )
     args = parser.parse_args(argv)
+
+    if args.no_proxy:
+        proxy = None
+    elif args.proxy:
+        proxy = normalize_proxy(args.proxy)
+        if proxy is None:
+            parser.error("--proxy 只支持 http:// 或 https:// 代理")
+    else:
+        proxy = proxy_from_env() or proxy_from_windows()
+    configure_proxy(proxy)
 
     if not (WEB_DIR / "index.html").is_file():
         print(f"缺少 {WEB_DIR / 'index.html'}", file=sys.stderr)
@@ -284,11 +428,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"启动失败: {error}", file=sys.stderr)
         return 1
 
+    proxy_note = (
+        f"{PROXY_URL}（仅 Google / OSM）" if PROXY_URL
+        else "未检测到（Google / OSM 可能不可达）"
+    )
     print("=" * 56)
     print("NMEA 分析平台已启动")
     print(f"  地址: {url}")
     print(f"  数据: {ROOT / 'nmea.log'}")
     print(f"  缓存: {CACHE_DIR}")
+    print(f"  代理: {proxy_note}")
     print("  按 Ctrl+C 退出")
     print("=" * 56)
 

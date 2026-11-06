@@ -85,6 +85,8 @@ const TILE_SOURCES = {
   'arcgis-imagery': '卫星影像',
   'gaode-satellite': '高德卫星',
   'gaode-street': '高德街道',
+  'google-satellite': 'Google 卫星（Earth）',
+  'google-street': 'Google 街道',
   'osm': 'OpenStreetMap',
   'none': '无底图',
 };
@@ -94,11 +96,41 @@ const TILE_MAX_ZOOM = {
   'arcgis-imagery': 19,
   'gaode-satellite': 18,
   'gaode-street': 18,
+  'google-satellite': 20,
+  'google-street': 20,
   'osm': 19,
   'none': 19,
 };
 
-const GCJ02_SOURCES = new Set(['gaode-street', 'gaode-satellite']);
+// Google 通过 gl=cn 返回大陆区域的 GCJ-02 瓦片（含卫星影像），
+// 与高德一样需要先把 WGS84 轨迹纠偏，否则会偏移几百米。
+const GCJ02_SOURCES = new Set([
+  'gaode-street', 'gaode-satellite', 'google-street', 'google-satellite',
+]);
+
+/* ------------------------------------------------------------------ *
+ * 地图图例 / 图层样式
+ * ------------------------------------------------------------------ */
+// 与 mapData() 返回的 trace 顺序一致，更新样式时按这个下标 restyle
+const MAP_TRACE_INDEX = { line: 0, track: 1, start: 2, end: 3, current: 4 };
+
+const MAP_LAYER_META = [
+  { key: 'line', name: '轨迹线', type: 'line', min: 1, max: 8, step: 0.5 },
+  { key: 'track', name: '轨迹点', type: 'point', min: 2, max: 12, step: 0.5 },
+  { key: 'start', name: '起点', type: 'point', min: 6, max: 24, step: 1 },
+  { key: 'end', name: '终点', type: 'point', min: 6, max: 24, step: 1 },
+  { key: 'current', name: '当前位置', type: 'point', min: 6, max: 28, step: 1 },
+];
+
+const DEFAULT_LAYER_STYLE = {
+  line: { color: '#2563eb', size: 2, visible: true },
+  track: { color: '#2563eb', size: 3.5, visible: true },
+  start: { color: '#16a34a', size: 10, visible: true },
+  end: { color: '#dc2626', size: 10, visible: true },
+  current: { color: '#f59e0b', size: 15, visible: true },
+};
+
+const LAYER_STYLE_KEY = 'nmea.mapLayerStyle.v1';
 
 /* ------------------------------------------------------------------ *
  * WGS84 -> GCJ-02（高德/腾讯底图使用 GCJ-02，不纠偏会偏移几百米）
@@ -575,6 +607,10 @@ const state = {
   mapSource: 'arcgis-imagery',
   view: null,          // 手动缩放/平移后的视野 { zoom, center }，重建地图时沿用
   mapReady: false,
+  layerStyle: null,     // 轨迹线/点的图例样式，init 时从 localStorage 恢复
+  legendCollapsed: false,
+  styleFrame: null,
+  pendingStyleLayers: new Set(),
   skyReady: false,
   gaugeReady: false,
   maxSpeedKmh: 10,
@@ -659,6 +695,42 @@ function mapLayout() {
   return layout;
 }
 
+function layerStyle(layer) {
+  return (state.layerStyle || DEFAULT_LAYER_STYLE)[layer];
+}
+
+function mapLineTrace(lons, lats) {
+  const style = layerStyle('line');
+  return {
+    type: 'scattermapbox',
+    mode: 'lines',
+    lon: lons,
+    lat: lats,
+    line: { color: style.color, width: style.size },
+    visible: style.visible,
+    hoverinfo: 'skip',
+    name: '轨迹线',
+  };
+}
+
+function mapPointTrace(lons, lats, layer, name) {
+  const style = layerStyle(layer);
+  return {
+    type: 'scattermapbox',
+    mode: 'markers',
+    lon: lons,
+    lat: lats,
+    marker: {
+      size: style.size,
+      color: style.color,
+      opacity: layer === 'track' ? 0.95 : 1,
+    },
+    visible: style.visible,
+    hoverinfo: 'skip',
+    name,
+  };
+}
+
 function mapData(currentIndex) {
   const located = state.epochs.filter((epoch) => epoch.lat !== null && epoch.lon !== null);
   const projected = located.map((epoch) => toDisplay(epoch.lat, epoch.lon));
@@ -667,57 +739,21 @@ function mapData(currentIndex) {
   const current = state.epochs[currentIndex];
   const currentPoint = current ? toDisplay(current.lat, current.lon) : [null, null];
 
-  if (!lons.length) {
-    return ['轨迹', '起点', '终点', '当前位置'].map((name) => ({
-      type: 'scattermapbox',
-      mode: 'markers',
-      lon: [],
-      lat: [],
-      hoverinfo: 'skip',
-      name,
-    }));
-  }
+  const startLons = lons.length ? [lons[0]] : [];
+  const startLats = lats.length ? [lats[0]] : [];
+  const endLons = lons.length ? [lons[lons.length - 1]] : [];
+  const endLats = lats.length ? [lats[lats.length - 1]] : [];
+  const currentLons = currentPoint[1] !== null ? [currentPoint[1]] : [];
+  const currentLats = currentPoint[0] !== null ? [currentPoint[0]] : [];
 
-  const traces = [
-    {
-      // 点线：每个历元画一个点（scattermapbox 忽略 line.dash，只能靠点间距成线）
-      type: 'scattermapbox',
-      mode: 'markers',
-      lon: lons,
-      lat: lats,
-      marker: { size: 3.5, color: '#2563eb', opacity: 0.95 },
-      hoverinfo: 'skip',
-      name: '轨迹',
-    },
-    {
-      type: 'scattermapbox',
-      mode: 'markers',
-      lon: lons.length ? [lons[0]] : [],
-      lat: lats.length ? [lats[0]] : [],
-      marker: { size: 10, color: '#16a34a' },
-      hoverinfo: 'skip',
-      name: '起点',
-    },
-    {
-      type: 'scattermapbox',
-      mode: 'markers',
-      lon: lons.length ? [lons[lons.length - 1]] : [],
-      lat: lats.length ? [lats[lats.length - 1]] : [],
-      marker: { size: 10, color: '#dc2626' },
-      hoverinfo: 'skip',
-      name: '终点',
-    },
-    {
-      type: 'scattermapbox',
-      mode: 'markers',
-      lon: currentPoint[1] !== null ? [currentPoint[1]] : [],
-      lat: currentPoint[0] !== null ? [currentPoint[0]] : [],
-      marker: { size: 15, color: '#f59e0b', opacity: 0.95 },
-      hoverinfo: 'skip',
-      name: '当前位置',
-    },
+  // 顺序必须与 MAP_TRACE_INDEX 一致
+  return [
+    mapLineTrace(lons, lats),
+    mapPointTrace(lons, lats, 'track', '轨迹点'),
+    mapPointTrace(startLons, startLats, 'start', '起点'),
+    mapPointTrace(endLons, endLats, 'end', '终点'),
+    mapPointTrace(currentLons, currentLats, 'current', '当前位置'),
   ];
-  return traces;
 }
 
 function renderMap(full = false) {
@@ -732,7 +768,7 @@ function renderMap(full = false) {
   const [currentLat, currentLon] = current ? toDisplay(current.lat, current.lon) : [null, null];
   const lon = currentLon !== null ? [currentLon] : [];
   const lat = currentLat !== null ? [currentLat] : [];
-  Plotly.restyle('map', { lon: [lon], lat: [lat] }, [3]);
+  Plotly.restyle('map', { lon: [lon], lat: [lat] }, [MAP_TRACE_INDEX.current]);
 }
 
 /**
@@ -766,6 +802,187 @@ function attachMapInteractions() {
       Plotly.relayout(element, 'mapbox.zoom', clamped).then(release, release);
     }
   });
+}
+
+/* ------------------------------------------------------------------ *
+ * 地图图例 / 样式面板
+ * ------------------------------------------------------------------ */
+function cloneDefaultLayerStyle() {
+  const styles = {};
+  for (const meta of MAP_LAYER_META) {
+    styles[meta.key] = { ...DEFAULT_LAYER_STYLE[meta.key] };
+  }
+  return styles;
+}
+
+function loadLayerStyle() {
+  const styles = cloneDefaultLayerStyle();
+  try {
+    const saved = JSON.parse(localStorage.getItem(LAYER_STYLE_KEY) || 'null');
+    if (!saved || typeof saved !== 'object') return styles;
+    for (const meta of MAP_LAYER_META) {
+      const value = saved[meta.key];
+      if (!value || typeof value !== 'object') continue;
+      const target = styles[meta.key];
+      if (typeof value.color === 'string' && /^#[0-9a-f]{6}$/i.test(value.color)) {
+        target.color = value.color;
+      }
+      const size = Number(value.size);
+      if (Number.isFinite(size)) target.size = Math.min(meta.max, Math.max(meta.min, size));
+      if (typeof value.visible === 'boolean') target.visible = value.visible;
+    }
+  } catch (error) {
+    // 本地设置损坏或 localStorage 不可用时退回默认样式
+  }
+  return styles;
+}
+
+function saveLayerStyle() {
+  try {
+    localStorage.setItem(LAYER_STYLE_KEY, JSON.stringify(state.layerStyle));
+  } catch (error) {
+    // 隐私模式等场景下 localStorage 可能不可用，忽略即可
+  }
+}
+
+function formatLayerSize(value) {
+  return Number.isInteger(value) ? String(value) : value.toFixed(1);
+}
+
+function layerPreviewStyle(meta, style) {
+  if (meta.type === 'line') {
+    return `--c:${style.color};--w:${Math.max(1, Math.min(6, style.size))}px`;
+  }
+  return `--c:${style.color};--s:${Math.max(5, Math.min(13, style.size))}px`;
+}
+
+function buildMapLegend() {
+  if (!dom.legendRows) return;
+  dom.legendRows.innerHTML = '';
+  for (const meta of MAP_LAYER_META) {
+    const style = layerStyle(meta.key);
+    const row = document.createElement('div');
+    row.className = 'legend-row';
+    row.dataset.layer = meta.key;
+    row.classList.toggle('off', !style.visible);
+
+    const eye = document.createElement('label');
+    eye.className = 'legend-eye';
+    eye.title = `显示 / 隐藏${meta.name}`;
+    const visible = document.createElement('input');
+    visible.type = 'checkbox';
+    visible.checked = style.visible;
+    eye.appendChild(visible);
+
+    const color = document.createElement('input');
+    color.type = 'color';
+    color.className = 'legend-color';
+    color.value = style.color;
+    color.title = `${meta.name}颜色`;
+
+    const name = document.createElement('span');
+    name.className = 'legend-name';
+    name.textContent = meta.name;
+
+    const preview = document.createElement('span');
+    preview.className = `legend-preview ${meta.type}`;
+    preview.style.cssText = layerPreviewStyle(meta, style);
+
+    const range = document.createElement('label');
+    range.className = 'legend-range';
+    range.title = meta.type === 'line' ? '轨迹线宽度' : `${meta.name}大小`;
+    const slider = document.createElement('input');
+    slider.type = 'range';
+    slider.min = String(meta.min);
+    slider.max = String(meta.max);
+    slider.step = String(meta.step);
+    slider.value = String(style.size);
+    const value = document.createElement('span');
+    value.className = 'legend-value';
+    value.textContent = formatLayerSize(style.size);
+    range.append(slider, value);
+
+    row.append(eye, color, name, preview, range);
+    dom.legendRows.appendChild(row);
+
+    visible.addEventListener('change', () => {
+      setLayerStyle(meta.key, { visible: visible.checked });
+    });
+    color.addEventListener('input', () => {
+      setLayerStyle(meta.key, { color: color.value });
+    });
+    slider.addEventListener('input', () => {
+      setLayerStyle(meta.key, { size: Number(slider.value) });
+    });
+  }
+  setLegendCollapsed(state.legendCollapsed);
+}
+
+function refreshLegendRow(layer) {
+  if (!dom.legendRows) return;
+  const meta = MAP_LAYER_META.find((item) => item.key === layer);
+  const row = dom.legendRows.querySelector(`.legend-row[data-layer="${layer}"]`);
+  if (!meta || !row) return;
+  const style = layerStyle(layer);
+  row.classList.toggle('off', !style.visible);
+  row.querySelector('.legend-color').value = style.color;
+  row.querySelector('.legend-preview').style.cssText = layerPreviewStyle(meta, style);
+  row.querySelector('.legend-range input').value = String(style.size);
+  row.querySelector('.legend-value').textContent = formatLayerSize(style.size);
+}
+
+function setLegendCollapsed(collapsed) {
+  state.legendCollapsed = collapsed;
+  if (!dom.mapLegend) return;
+  dom.mapLegend.classList.toggle('collapsed', collapsed);
+  dom.legendToggle.textContent = collapsed ? '+' : '−';
+  dom.legendToggle.title = collapsed ? '展开图例' : '收起图例';
+  dom.legendToggle.setAttribute('aria-expanded', String(!collapsed));
+}
+
+function applyLayerStyle(layer) {
+  if (!state.mapReady) return;
+  const index = MAP_TRACE_INDEX[layer];
+  if (index === undefined) return;
+  const style = layerStyle(layer);
+  const update = { visible: style.visible };
+  if (layer === 'line') {
+    update['line.color'] = style.color;
+    update['line.width'] = style.size;
+  } else {
+    update['marker.color'] = style.color;
+    update['marker.size'] = style.size;
+  }
+  Plotly.restyle('map', update, [index]);
+}
+
+function scheduleLayerStyle(layer) {
+  state.pendingStyleLayers.add(layer);
+  if (state.styleFrame !== null) return;
+  state.styleFrame = requestAnimationFrame(() => {
+    state.styleFrame = null;
+    const layers = [...state.pendingStyleLayers];
+    state.pendingStyleLayers.clear();
+    for (const key of layers) applyLayerStyle(key);
+  });
+}
+
+function setLayerStyle(layer, patch) {
+  if (!state.layerStyle) state.layerStyle = cloneDefaultLayerStyle();
+  Object.assign(state.layerStyle[layer], patch);
+  saveLayerStyle();
+  refreshLegendRow(layer);
+  scheduleLayerStyle(layer);
+}
+
+function resetLayerStyle() {
+  state.layerStyle = cloneDefaultLayerStyle();
+  saveLayerStyle();
+  for (const meta of MAP_LAYER_META) {
+    refreshLegendRow(meta.key);
+    applyLayerStyle(meta.key);
+  }
+  toast('地图图例样式已恢复默认');
 }
 
 /* ------------------------------------------------------------------ *
@@ -1299,6 +1516,10 @@ function cacheDom() {
   dom.timeTotal = document.getElementById('time-total');
   dom.epochLabel = document.getElementById('epoch-label');
   dom.mapInfo = document.getElementById('map-info');
+  dom.mapLegend = document.getElementById('map-legend');
+  dom.legendRows = document.getElementById('legend-rows');
+  dom.legendToggle = document.getElementById('legend-toggle');
+  dom.legendReset = document.getElementById('legend-reset');
   dom.systemFilter = document.getElementById('system-filter');
   dom.readouts = document.getElementById('readouts');
   dom.courseTitle = document.getElementById('course-title');
@@ -1332,6 +1553,11 @@ function bindEvents() {
   dom.btnPlay.addEventListener('click', togglePlayback);
   dom.btnBack.addEventListener('click', () => stepTime(-1));
   dom.btnFwd.addEventListener('click', () => stepTime(1));
+
+  dom.legendToggle.addEventListener('click', () => {
+    setLegendCollapsed(!state.legendCollapsed);
+  });
+  dom.legendReset.addEventListener('click', resetLayerStyle);
 
   for (const button of dom.rateButtons) {
     button.addEventListener('click', () => {
@@ -1415,6 +1641,10 @@ function bindEvents() {
 function init() {
   cacheDom();
   bindEvents();
+
+  // 图例样式在首次渲染地图前恢复，保证初始 trace 就用用户的配色
+  state.layerStyle = loadLayerStyle();
+  buildMapLegend();
 
   // 支持 ?base=gaode-street 这类链接直接指定底图
   const params = new URLSearchParams(location.search);

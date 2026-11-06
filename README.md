@@ -11,6 +11,8 @@
 
 ![高德街道底图（GCJ-02 纠偏后）](docs/screenshot-gaode.jpg)
 
+![地图图例与样式面板](docs/screenshot-legend.jpg)
+
 ## 目录
 
 ```
@@ -99,12 +101,16 @@ python -m unittest discover -s tests -v
 python serve.py            # 打开 http://localhost:8000/
 python serve.py --open     # 顺便拉起浏览器
 python serve.py --port 9000
+python serve.py --proxy http://127.0.0.1:1080   # Google / OSM 需要代理时
 ```
+
+Google / OSM 瓦片在部分网络（尤其大陆）无法直连。`serve.py` 启动时会自动读取 `HTTPS_PROXY` / `HTTP_PROXY` 等环境变量或 Windows 系统代理设置（含 PAC），**只让 Google / OSM 走代理**，ArcGIS / 高德仍直连；启动日志会打印检测结果。也可以显式指定 `--proxy`，或用 `--no-proxy` 关闭自动代理。
 
 页面布局：
 
-- **左侧地图**：轨迹画成点线（每个历元一个点），起点（绿）、终点（红）、当前位置（橙）。底图可在顶栏切换。
-  - 鼠标滚轮缩放、按住左键拖拽平移；缩放范围按底图可用瓦片级别限制（影像 19 级、高德 18 级）。
+- **左侧地图**：轨迹画成连线 + 历元点，起点（绿）、终点（红）、当前位置（橙）。底图可在顶栏切换。
+  - 左上角「图例 · 样式」可以显示/隐藏轨迹线、轨迹点、起点、终点、当前位置，并直接调整轨迹线颜色/宽度、轨迹点和标记点的颜色/大小；「重置」恢复默认值，设置保存在浏览器 `localStorage`，刷新或切换底图后仍然保留。
+  - 鼠标滚轮缩放、按住左键拖拽平移；缩放范围按底图可用瓦片级别限制（ArcGIS 19 级、高德 18 级、Google 20 级）。
   - 手动调整的视野会保留：拖动进度条、播放、切换底图都不会把镜头拉回初始位置；高德与影像之间切换时自动做 GCJ-02 换算，位置不漂移。
 - **右上星空图**：卫星按方位角（0°=北，顺时针）与仰角（圆心=天顶）投影到极坐标。
   - 圆点 = 有载噪比，颜色从红（低）经黄到绿（高），见右侧 cn0 色标；点的大小也随 cn0 变化。
@@ -118,9 +124,9 @@ python serve.py --port 9000
 交互：
 
 - 点击「打开 NMEA 文件」或直接把 `.log` / `.nmea` / `.txt` 文件拖进页面。
-- 顶栏「底图」切换卫星影像 / 高德街道 / 高德卫星 / OSM / 无底图。
+- 顶栏「底图」切换卫星影像 / 高德街道 / 高德卫星 / Google 卫星（Earth）/ Google 街道 / OSM / 无底图。
 - 空格键播放/暂停，`←` `→` 后退/前进 1 秒。
-- 链接参数 `?base=gaode-street` 可指定默认底图。
+- 链接参数 `?base=gaode-street` 可指定默认底图（也支持 `?base=google-satellite`、`?base=google-street`）。
 
 ### 底图与坐标系
 
@@ -128,14 +134,18 @@ python serve.py --port 9000
 | --- | --- | --- |
 | 卫星影像（ArcGIS World Imagery） | WGS84 | 直接使用 |
 | 高德街道 / 高德卫星 | GCJ-02 | 前端做 WGS84 → GCJ-02 纠偏，否则会偏移约 400 m |
+| Google 卫星（Earth，`lyrs=s`）/ Google 街道（`lyrs=m`） | GCJ-02 | 瓦片带 `gl=cn`，与大陆 GCJ-02 路网一致；前端同样做纠偏 |
 | OpenStreetMap | WGS84 | 直接使用 |
 
-地图瓦片通过 `serve.py` 的 `/tiles/{source}/{z}/{x}/{y}` 代理获取（同时解决 CORS 与 ArcGIS 的 `{z}/{y}/{x}` 顺序问题），并缓存在 `.cache/tiles`。因此页面必须经由 `serve.py` 打开，直接用 `file://` 无法加载数据与底图。
+地图瓦片通过 `serve.py` 的 `/tiles/{source}/{z}/{x}/{y}` 代理获取（同时解决 CORS 与 ArcGIS 的 `{z}/{y}/{x}` 顺序问题），并缓存在 `.cache/tiles`。因此页面必须经由 `serve.py` 打开，直接用 `file://` 无法加载数据与底图。Google 卫星 / 街道底图请求的是 `mt1.google.com` 的 `lyrs=s` / `lyrs=m` 瓦片，代理层带 `gl=cn` 与浏览器 UA；这两个源和 OSM 在检测到代理时走代理，其余源直连。
+
+> Google / OSM 底图空白时，先看 `serve.py` 的启动日志：显示「代理: 未检测到」就需要先启动代理客户端或用 `--proxy` 指定；控制台出现 `[tile] 失败 google-... timed out` 表示对应域名在当前网络不可达，与前端无关。
 
 `web/app.js` 内含一份与 `nmea_parser.py` 行为一致的解析实现，所以浏览器端不需要 Python 也能解析日志文件（只有瓦片代理依赖 `serve.py`）。
 
 ## 已知限制
 
 - Plotly 3 对 `mapbox` 系列 trace 给出弃用提示（建议迁移到 `map` + MapLibre）。当前实现仍使用 `scattermapbox`，功能正常；浏览器控制台会出现一条弃用警告，以及 Plotly 内部在底图 style 加载期触发的一条 `Style is not done loading`，均不影响渲染。
-- ArcGIS World Imagery 在 20 级及以上无瓦片，高德瓦片最高 18 级，因此地图缩放上限按底图分别限制。
-- OSM 瓦片在本机网络下不可达（超时），列为选项目前可能加载失败；ArcGIS 已停用 World_Street_Map / World_Topo_Map 的瓦片返回，故未采用。
+- ArcGIS World Imagery 在 20 级及以上无瓦片，高德瓦片最高 18 级，Google 瓦片最高 20 级，因此地图缩放上限按底图分别限制。
+- Google 底图使用其未公开的瓦片接口（`mt1.google.com/vt/lyrs=...`），该接口在部分网络不可直连；`serve.py` 检测到代理时会自动使用，没有可用代理时底图会空白（瓦片代理返回 502）。这类接口也可能随时变更或停用，且受 Google 服务条款约束，建议只在本地个人分析时使用。
+- OSM 与 Google 类似，在部分网络不可直连，`serve.py` 会按同一套代理设置访问；未检测到代理时同样可能返回 502。ArcGIS 已停用 World_Street_Map / World_Topo_Map 的瓦片返回，故未采用。

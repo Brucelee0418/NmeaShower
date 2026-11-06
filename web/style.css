@@ -230,6 +230,166 @@ main {
   font-variant-numeric: tabular-nums;
 }
 
+/* ---------------- 地图图例 / 样式 ---------------- */
+.map-legend {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 6;
+  width: 270px;
+  max-width: calc(100% - 24px);
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 2px 12px rgba(15, 23, 42, 0.16);
+  color: var(--ink);
+  font-size: 11px;
+  backdrop-filter: blur(4px);
+}
+
+.map-legend.collapsed { width: auto; }
+.map-legend.collapsed .legend-rows { display: none; }
+.map-legend.collapsed .legend-head { border-bottom: 0; }
+
+.legend-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 4px 6px 4px 9px;
+  border-bottom: 1px solid #eef2f7;
+  font-weight: 600;
+  color: #334155;
+  white-space: nowrap;
+}
+
+.legend-title { letter-spacing: 0.02em; }
+
+.legend-actions { display: flex; align-items: center; gap: 1px; }
+
+.legend-reset,
+.legend-toggle {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: #64748b;
+  font: inherit;
+  font-size: 10.5px;
+  line-height: 18px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.legend-toggle {
+  width: 20px;
+  padding: 0;
+  font-size: 14px;
+  line-height: 18px;
+}
+
+.legend-reset:hover,
+.legend-toggle:hover { background: #eef2f7; color: #0f172a; }
+
+.legend-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 3px 7px 6px;
+}
+
+.legend-row {
+  display: grid;
+  grid-template-columns: 14px 17px minmax(44px, 1fr) 26px 76px;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 1px;
+  border-radius: 4px;
+}
+
+.legend-row:hover { background: #f8fafc; }
+
+.legend-eye {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.legend-eye input {
+  width: 12px;
+  height: 12px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.legend-color {
+  width: 17px;
+  height: 17px;
+  padding: 0;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  background: none;
+  cursor: pointer;
+}
+
+.legend-color::-webkit-color-swatch-wrapper { padding: 1px; }
+.legend-color::-webkit-color-swatch { border: none; border-radius: 2px; }
+
+.legend-name {
+  font-size: 10.5px;
+  color: #475569;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.legend-preview { justify-self: center; }
+
+.legend-preview.point {
+  display: block;
+  width: var(--s, 8px);
+  height: var(--s, 8px);
+  border-radius: 50%;
+  background: var(--c, #2563eb);
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.16);
+}
+
+.legend-preview.line {
+  display: block;
+  width: 24px;
+  height: 0;
+  border-top: var(--w, 2px) solid var(--c, #2563eb);
+  border-radius: 1px;
+}
+
+.legend-range {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.legend-range input {
+  width: 52px;
+  height: 12px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.legend-value {
+  min-width: 20px;
+  color: #94a3b8;
+  font-size: 9.5px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.legend-row.off .legend-name,
+.legend-row.off .legend-preview,
+.legend-row.off .legend-range { opacity: 0.38; }
+
 .side {
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto;

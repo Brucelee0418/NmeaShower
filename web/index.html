@@ -24,6 +24,8 @@
         <option value="arcgis-imagery" selected>卫星影像（WGS84）</option>
         <option value="gaode-satellite">高德卫星（GCJ-02 纠偏）</option>
         <option value="gaode-street">高德街道（GCJ-02 纠偏）</option>
+        <option value="google-satellite">Google 卫星（Earth，GCJ-02 纠偏）</option>
+        <option value="google-street">Google 街道（GCJ-02 纠偏）</option>
         <option value="osm">OpenStreetMap</option>
         <option value="none">无底图</option>
       </select>
@@ -54,6 +56,16 @@
   <main>
     <section class="panel map-panel">
       <div id="map" class="plot"></div>
+      <div id="map-legend" class="map-legend">
+        <div class="legend-head">
+          <span class="legend-title">图例 · 样式</span>
+          <div class="legend-actions">
+            <button id="legend-reset" class="legend-reset" type="button" title="恢复默认颜色和大小">重置</button>
+            <button id="legend-toggle" class="legend-toggle" type="button" aria-expanded="true" title="收起图例">−</button>
+          </div>
+        </div>
+        <div id="legend-rows" class="legend-rows"></div>
+      </div>
       <div id="map-info" class="map-info"></div>
     </section>
 

@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# 运行产物
+out/
+.cache/
+.scratch/
+
+# 依赖 / 工具
+node_modules/
+package-lock.json
+
+# 编辑器
+.vscode/
+.idea/
+
+# 工具会话目录
+.codewhale/

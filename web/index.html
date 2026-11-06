@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NMEA 分析平台</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%230f172a'/%3E%3Cpath d='M16 5 L19 16 L16 27 L13 16 Z' fill='%2322c55e'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="style.css" />
+  <script src="vendor/plotly.min.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot"></span>
+      <span>NMEA 分析平台</span>
+    </div>
+
+    <label class="button" for="file-input">打开 NMEA 文件</label>
+    <input id="file-input" type="file" accept=".log,.nmea,.txt,text/plain" hidden />
+
+    <label class="field">
+      <span>底图</span>
+      <select id="map-style">
+        <option value="arcgis-imagery" selected>卫星影像（WGS84）</option>
+        <option value="gaode-satellite">高德卫星（GCJ-02 纠偏）</option>
+        <option value="gaode-street">高德街道（GCJ-02 纠偏）</option>
+        <option value="osm">OpenStreetMap</option>
+        <option value="none">无底图</option>
+      </select>
+    </label>
+
+    <button id="btn-play" class="button" type="button" disabled>▶ 播放</button>
+
+    <input id="slider" type="range" min="0" max="0" value="0" step="1" disabled />
+
+    <label class="field">
+      <span>倍速</span>
+      <select id="speed">
+        <option value="1">1×</option>
+        <option value="2" selected>2×</option>
+        <option value="5">5×</option>
+        <option value="10">10×</option>
+      </select>
+    </label>
+
+    <span id="epoch-label" class="epoch-label">未加载数据</span>
+  </header>
+
+  <main>
+    <section class="panel map-panel">
+      <div id="map" class="plot"></div>
+      <div id="map-info" class="map-info"></div>
+    </section>
+
+    <aside class="side">
+      <section class="panel sky-panel">
+        <div class="panel-head">
+          <h2>星空图（卫星分布）</h2>
+          <div id="system-filter" class="chips"></div>
+        </div>
+        <div class="sky-note">
+          <span><i class="dot-marker"></i>圆点 = 有载噪比（红→黄→绿随 cn0 升高）</span>
+          <span><i class="tri-marker"></i>黑色三角 = 无载噪比（cn0 为 0）</span>
+        </div>
+        <div id="sky" class="plot"></div>
+      </section>
+
+      <section class="panel dash-panel">
+        <div class="panel-head">
+          <h2>仪表盘</h2>
+          <label class="toggle">
+            <input id="show-labels" type="checkbox" checked />
+            <span>星空图标注</span>
+          </label>
+        </div>
+        <div class="dash-grid">
+          <div class="gauge-cell">
+            <div class="gauge-title">速度 · km/h</div>
+            <div id="gauge-speed" class="gauge"></div>
+          </div>
+          <div class="gauge-cell">
+            <div class="gauge-title" id="course-title">航向</div>
+            <div id="gauge-course" class="gauge"></div>
+          </div>
+          <div id="readouts" class="readouts"></div>
+        </div>
+      </section>
+    </aside>
+  </main>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+# 日志数据保持原样，不做换行转换
+nmea.log -text
+*.log -text
+
+# 文本文件统一 LF
+*.py text eol=lf
+*.js text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.md text eol=lf

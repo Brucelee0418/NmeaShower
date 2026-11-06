@@ -44,6 +44,7 @@ const COMPASS_POINTS = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE',
 const PLOT_CONFIG = {
   responsive: true,
   displaylogo: false,
+  scrollZoom: true,
   modeBarButtonsToRemove: ['lasso2d', 'select2d', 'autoScale2d', 'toggleSpikelines'],
 };
 
@@ -72,7 +73,8 @@ function buildBaseStyle(source) {
     },
     layers: [
       { id: 'nmea-bg', type: 'background', paint: { 'background-color': '#f8fafc' } },
-      { id: 'nmea-basemap', type: 'raster', source: 'basemap', minzoom: 0, maxzoom: maxZoom },
+      // 图层不设 maxzoom：给 overzoom 留空间，否则放大到瓦片极限时整层会被隐藏
+      { id: 'nmea-basemap', type: 'raster', source: 'basemap', minzoom: 0 },
     ],
   };
   state.baseStyle = { source, style };
@@ -141,6 +143,31 @@ function wgs84ToGcj02(lat, lon) {
 function toDisplay(lat, lon) {
   if (lat === null || lon === null) return [null, null];
   return GCJ02_SOURCES.has(state.mapSource) ? wgs84ToGcj02(lat, lon) : [lat, lon];
+}
+
+/** GCJ-02 -> WGS84，用迭代逼近（正向变换没有解析逆）。 */
+function gcj02ToWgs84(lat, lon) {
+  if (outOfChina(lat, lon)) return [lat, lon];
+  let wgsLat = lat;
+  let wgsLon = lon;
+  for (let i = 0; i < 3; i += 1) {
+    const [gcjLat, gcjLon] = wgs84ToGcj02(wgsLat, wgsLon);
+    wgsLat += lat - gcjLat;
+    wgsLon += lon - gcjLon;
+  }
+  return [wgsLat, wgsLon];
+}
+
+/** 把保存下来的视野换算到当前底图的坐标系。 */
+function viewCenterFor(source) {
+  if (!state.view) return null;
+  const targetGcj = GCJ02_SOURCES.has(source);
+  const { center } = state.view;
+  if (Boolean(state.view.gcj) === targetGcj) return { ...center };
+  const [lat, lon] = targetGcj
+    ? wgs84ToGcj02(center.lat, center.lon)
+    : gcj02ToWgs84(center.lat, center.lon);
+  return { lat, lon };
 }
 
 /* ------------------------------------------------------------------ *
@@ -546,6 +573,7 @@ const state = {
   activeSystems: new Set(),
   showLabels: true,
   mapSource: 'arcgis-imagery',
+  view: null,          // 手动缩放/平移后的视野 { zoom, center }，重建地图时沿用
   mapReady: false,
   skyReady: false,
   gaugeReady: false,
@@ -579,6 +607,14 @@ function toast(message, isError = false) {  dom.toast.textContent = message;
 /* ------------------------------------------------------------------ *
  * 地图
  * ------------------------------------------------------------------ */
+/**
+ * 地图缩放上限：等于该底图能提供的最大瓦片级别。
+ * 超过这个级别，mapbox 会去请求不存在的瓦片，整张底图就变空白。
+ */
+function mapZoomLimit(source) {
+  return Math.max(2, TILE_MAX_ZOOM[source] || 19);
+}
+
 function mapLayout() {
   const layout = {
     margin: { l: 0, r: 0, t: 0, b: 0 },
@@ -590,6 +626,14 @@ function mapLayout() {
       zoom: 12,
     },
   };
+
+  // 用户手动缩放/平移过（或切换底图时保留了视野）就以当前视野为准
+  if (state.view) {
+    layout.mapbox.center = viewCenterFor(state.mapSource) || { ...state.view.center };
+    layout.mapbox.zoom = Math.min(state.view.zoom, mapZoomLimit(state.mapSource));
+    return layout;
+  }
+
   const bounds = state.summary && state.summary.bounds;
   if (!bounds) return layout;
 
@@ -604,11 +648,11 @@ function mapLayout() {
     lonSpan * 111320 * Math.cos((centerLat * Math.PI) / 180),
     5,
   );
-  const maxTileZoom = TILE_MAX_ZOOM[state.mapSource] || 19;
+  // source 的 maxzoom 限制了瓦片级别，地图 zoom 可以直接开到这一级。
+  // 默认视图比上限低一级，保证滚轮一开始就能往上放大。
+  const limit = mapZoomLimit(state.mapSource);
   const fitZoom = Math.log2((320 * 156543 * Math.cos((centerLat * Math.PI) / 180)) / meters);
-  // 声明的是 256px 瓦片，mapbox 在 zoom=z 时会取 z+1 级瓦片，
-  // 所以地图 zoom 要比瓦片级别的上限小一档，否则一个请求都发不出去
-  const zoom = Math.min(maxTileZoom - 1, Math.max(2, fitZoom));
+  const zoom = Math.min(limit - 1, Math.max(2, fitZoom));
 
   layout.mapbox.center = { lon: centerLon, lat: centerLat };
   layout.mapbox.zoom = zoom;
@@ -681,6 +725,7 @@ function renderMap(full = false) {
     const layout = mapLayout();
     Plotly.react('map', mapData(state.index), layout, PLOT_CONFIG);
     state.mapReady = true;
+    attachMapInteractions();
     return;
   }
   const current = state.epochs[state.index];
@@ -688,6 +733,39 @@ function renderMap(full = false) {
   const lon = currentLon !== null ? [currentLon] : [];
   const lat = currentLat !== null ? [currentLat] : [];
   Plotly.restyle('map', { lon: [lon], lat: [lat] }, [3]);
+}
+
+/**
+ * 记录用户在地图上滚轮缩放 / 拖拽平移后的视野，
+ * 以便切换底图或重建地图时不会把镜头拉回初始位置。
+ */
+function attachMapInteractions() {
+  const element = document.getElementById('map');
+  if (!element || typeof element.on !== 'function' || element.__viewBound) return;
+  element.__viewBound = true;
+  // 防止 relayout 纠正缩放的递归调用：第一次修正期间忽略后续事件
+  let clamping = false;
+  element.on('plotly_relayout', () => {
+    if (clamping) return;
+    const layout = element._fullLayout;
+    const mapbox = layout && layout.mapbox;
+    if (!mapbox || typeof mapbox.zoom !== 'number' || !mapbox.center) return;
+
+    // Plotly 不会把 maxzoom 传给 mapbox-gl，滚轮能一直放大到超出瓦片范围，
+    // 超过后底图会变空白，所以这里主动把镜头收回可用级别
+    const limit = mapZoomLimit(state.mapSource);
+    const clamped = Math.min(mapbox.zoom, limit);
+    state.view = {
+      zoom: clamped,
+      center: { lat: mapbox.center.lat, lon: mapbox.center.lon },
+      gcj: GCJ02_SOURCES.has(state.mapSource),
+    };
+    if (clamped < mapbox.zoom - 1e-6) {
+      clamping = true;
+      const release = () => { clamping = false; };
+      Plotly.relayout(element, 'mapbox.zoom', clamped).then(release, release);
+    }
+  });
 }
 
 /* ------------------------------------------------------------------ *
@@ -1168,6 +1246,7 @@ function loadText(text, name) {
   state.sourceName = name;
   state.index = 0;
   state.maxSpeedKmh = state.summary.maxSpeedKmh;
+  state.view = null;
   state.times = buildTimeAxis(parsed.epochs);
   state.duration = state.times.length ? state.times[state.times.length - 1] : 0;
 
@@ -1244,7 +1323,9 @@ function bindEvents() {
     // 直接改 raster layer 会撞上 mapbox 的 "Style is not done loading"，
     // 因此先拆掉地图容器，再在下一帧重建
     Plotly.purge('map');
-    document.getElementById('map').innerHTML = '';
+    const holder = document.getElementById('map');
+    holder.innerHTML = '';
+    holder.__viewBound = false;  // purge 后需要重新绑定 relayout 监听
     requestAnimationFrame(() => requestAnimationFrame(() => renderMap(true)));
   });
 

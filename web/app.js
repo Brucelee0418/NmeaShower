@@ -535,9 +535,14 @@ const state = {
   summary: null,
   sourceName: '',
   index: 0,
+  times: [],          // 每个历元相对起点的秒数
+  duration: 0,        // 最后一个历元的相对秒数
   playing: false,
-  timer: null,
-  speed: 2,
+  rate: 1,            // 播放倍速
+  playAnchorWall: 0,  // 播放起点的墙钟时间
+  playAnchorTime: 0,  // 播放起点的数据时间
+  rafHandle: null,
+  scrubbing: false,
   activeSystems: new Set(),
   showLabels: true,
   mapSource: 'arcgis-imagery',
@@ -631,11 +636,12 @@ function mapData(currentIndex) {
 
   const traces = [
     {
+      // 点线：每个历元画一个点（scattermapbox 忽略 line.dash，只能靠点间距成线）
       type: 'scattermapbox',
-      mode: 'lines',
+      mode: 'markers',
       lon: lons,
       lat: lats,
-      line: { width: 3, color: '#2563eb' },
+      marker: { size: 3.5, color: '#2563eb', opacity: 0.95 },
       hoverinfo: 'skip',
       name: '轨迹',
     },
@@ -687,12 +693,22 @@ function renderMap(full = false) {
 /* ------------------------------------------------------------------ *
  * 星空图
  * ------------------------------------------------------------------ */
-function skyLayout() {
+function skyLayout(hasSatellites = true) {
   return {
     margin: { l: 46, r: 34, t: 16, b: 22 },
     paper_bgcolor: '#ffffff',
     plot_bgcolor: '#ffffff',
     showlegend: false,
+    // 该历元没有 GSV 语句时给一句说明，避免误以为是渲染失败
+    annotations: hasSatellites ? [] : [{
+      text: '该历元无 GSV 数据',
+      xref: 'paper',
+      yref: 'paper',
+      x: 0.5,
+      y: 0.5,
+      showarrow: false,
+      font: { size: 11, color: '#94a3b8' },
+    }],
     polar: {
       bgcolor: '#ffffff',
       angularaxis: {
@@ -813,7 +829,9 @@ function skyData(epoch) {
 
 function renderSky() {
   const epoch = state.epochs[state.index];
-  Plotly.react('sky', skyData(epoch), skyLayout(), PLOT_CONFIG);
+  const data = skyData(epoch);
+  const hasSatellites = data.some((trace) => trace.r && trace.r.length > 0);
+  Plotly.react('sky', data, skyLayout(hasSatellites), PLOT_CONFIG);
   state.skyReady = true;
 }
 
@@ -914,13 +932,72 @@ function renderReadouts() {
 }
 
 /* ------------------------------------------------------------------ *
+ * 时间轴
+ * ------------------------------------------------------------------ */
+/**
+ * 把历元的 UTC 时间换算成相对起点的秒数，供进度条与播放使用。
+ * 无时间戳的历元沿用前一个历元 +1 s；跨零点时补一天，保证单调递增。
+ */
+function buildTimeAxis(epochs) {
+  const times = [];
+  let offset = 0;
+  let previous = null;
+  let first = null;
+  for (const epoch of epochs) {
+    let absolute;
+    if (epoch.secondsOfDay === null || epoch.secondsOfDay === undefined) {
+      absolute = previous === null ? 0 : previous + 1;
+    } else {
+      absolute = epoch.secondsOfDay + offset;
+      if (previous !== null && absolute < previous - 43200) {
+        offset += 86400;
+        absolute += 86400;
+      }
+    }
+    if (first === null) first = absolute;
+    times.push(absolute - first);
+    previous = absolute;
+  }
+  return times;
+}
+
+/** 找出时间上最接近 seconds 的历元下标。 */
+function indexAtTime(seconds) {
+  const times = state.times;
+  if (!times.length) return 0;
+  let low = 0;
+  let high = times.length - 1;
+  while (low < high) {
+    const mid = (low + high) >> 1;
+    if (times[mid] < seconds) low = mid + 1;
+    else high = mid;
+  }
+  if (low > 0 && Math.abs(times[low - 1] - seconds) <= Math.abs(times[low] - seconds)) {
+    return low - 1;
+  }
+  return low;
+}
+
+/**
+ * 把进度条与秒数读数刷新到当前历元。
+ * 拖动进度条时不要回写 value，否则滑块会跟手指抢位置。
+ */
+function updateTimeline() {
+  const seconds = state.times[state.index] || 0;
+  // 与 range 的 step=0.1 对齐，避免读数和滑块差 0.1 s
+  const snapped = Math.round(seconds * 10) / 10;
+  if (!state.scrubbing) dom.slider.value = String(snapped);
+  dom.timeNow.textContent = `${snapped.toFixed(1)} s`;
+}
+
+/* ------------------------------------------------------------------ *
  * 渲染调度
  * ------------------------------------------------------------------ */
 function renderEpoch() {
   if (!state.epochs.length) return;
   const epoch = state.epochs[state.index];
 
-  dom.slider.value = String(state.index);
+  updateTimeline();
   dom.epochLabel.textContent = `${epoch.time || '--:--:--'} · ${state.index + 1}/${state.epochs.length}`;
 
   renderMap(false);
@@ -948,27 +1025,35 @@ function resizePlots() {
 }
 
 /* ------------------------------------------------------------------ *
- * 播放控制
+ * 播放控制（按真实时间推进，1× = 1 秒数据用 1 秒播放）
  * ------------------------------------------------------------------ */
 function stopPlayback() {
   state.playing = false;
-  clearTimeout(state.timer);
-  state.timer = null;
+  if (state.rafHandle !== null) {
+    cancelAnimationFrame(state.rafHandle);
+    state.rafHandle = null;
+  }
   dom.btnPlay.textContent = '▶ 播放';
 }
 
-function playbackTick() {
+function playbackFrame(now) {
   if (!state.playing) return;
-  const next = state.index + state.speed;
-  if (next >= state.epochs.length - 1) {
+  const elapsed = (now - state.playAnchorWall) / 1000;
+  const target = state.playAnchorTime + elapsed * state.rate;
+
+  if (target >= state.duration - 1e-6) {
     state.index = state.epochs.length - 1;
     renderEpoch();
     stopPlayback();
     return;
   }
-  state.index = next;
-  renderEpoch();
-  state.timer = setTimeout(playbackTick, 140);
+
+  const index = indexAtTime(target);
+  if (index !== state.index) {
+    state.index = index;
+    renderEpoch();
+  }
+  state.rafHandle = requestAnimationFrame(playbackFrame);
 }
 
 function togglePlayback() {
@@ -982,8 +1067,42 @@ function togglePlayback() {
     renderEpoch();
   }
   state.playing = true;
+  state.playAnchorWall = performance.now();
+  state.playAnchorTime = state.times[state.index] || 0;
   dom.btnPlay.textContent = '⏸ 暂停';
-  state.timer = setTimeout(playbackTick, 60);
+  state.rafHandle = requestAnimationFrame(playbackFrame);
+}
+
+function setRate(rate) {
+  state.rate = rate;
+  // 变速时重新锚定，避免已播放的时间被重复换算
+  if (state.playing) {
+    state.playAnchorWall = performance.now();
+    state.playAnchorTime = state.times[state.index] || 0;
+  }
+  for (const button of dom.rateButtons) {
+    button.classList.toggle('active', Number(button.dataset.rate) === rate);
+  }
+}
+
+/** 按秒跳转：delta 为 +1 / -1。 */
+function stepTime(delta) {
+  if (!state.epochs.length) return;
+  stopPlayback();
+  const current = state.times[state.index] || 0;
+  const target = Math.min(state.duration, Math.max(0, current + delta));
+  state.index = indexAtTime(target);
+  requestRender();
+}
+
+/** 拖动进度条：按秒定位到最近的历元。 */
+function scrubTo(seconds) {
+  if (!state.epochs.length) return;
+  stopPlayback();
+  const clamped = Math.min(state.duration, Math.max(0, seconds));
+  state.index = indexAtTime(clamped);
+  dom.timeNow.textContent = `${clamped.toFixed(1)} s`;
+  requestRender();
 }
 
 /* ------------------------------------------------------------------ *
@@ -1049,15 +1168,21 @@ function loadText(text, name) {
   state.sourceName = name;
   state.index = 0;
   state.maxSpeedKmh = state.summary.maxSpeedKmh;
+  state.times = buildTimeAxis(parsed.epochs);
+  state.duration = state.times.length ? state.times[state.times.length - 1] : 0;
 
   const systems = state.summary.systems || {};
   state.activeSystems = new Set(Object.keys(systems));
   buildSystemChips(systems);
 
-  dom.slider.max = String(state.epochs.length - 1);
+  dom.slider.max = String(Number(state.duration.toFixed(3)));
   dom.slider.value = '0';
   dom.slider.disabled = false;
+  dom.timeTotal.textContent = `共 ${state.duration.toFixed(1)} s`;
   dom.btnPlay.disabled = false;
+  dom.btnBack.disabled = false;
+  dom.btnFwd.disabled = false;
+  for (const button of dom.rateButtons) button.disabled = false;
 
   updateMapInfo();
   renderMap(true);
@@ -1088,6 +1213,11 @@ function cacheDom() {
   dom.toast = document.getElementById('toast');
   dom.slider = document.getElementById('slider');
   dom.btnPlay = document.getElementById('btn-play');
+  dom.btnBack = document.getElementById('btn-back');
+  dom.btnFwd = document.getElementById('btn-fwd');
+  dom.rateButtons = Array.from(document.querySelectorAll('.rate'));
+  dom.timeNow = document.getElementById('time-now');
+  dom.timeTotal = document.getElementById('time-total');
   dom.epochLabel = document.getElementById('epoch-label');
   dom.mapInfo = document.getElementById('map-info');
   dom.systemFilter = document.getElementById('system-filter');
@@ -1095,7 +1225,6 @@ function cacheDom() {
   dom.courseTitle = document.getElementById('course-title');
   dom.fileInput = document.getElementById('file-input');
   dom.mapStyle = document.getElementById('map-style');
-  dom.speed = document.getElementById('speed');
   dom.showLabels = document.getElementById('show-labels');
 }
 
@@ -1120,15 +1249,28 @@ function bindEvents() {
   });
 
   dom.btnPlay.addEventListener('click', togglePlayback);
+  dom.btnBack.addEventListener('click', () => stepTime(-1));
+  dom.btnFwd.addEventListener('click', () => stepTime(1));
 
+  for (const button of dom.rateButtons) {
+    button.addEventListener('click', () => {
+      if (button.disabled) return;
+      setRate(Number(button.dataset.rate) || 1);
+    });
+  }
+
+  // 进度条以秒为单位：拖动时不断停在最近的历元上，松手后对齐
+  dom.slider.addEventListener('pointerdown', () => { state.scrubbing = true; });
   dom.slider.addEventListener('input', () => {
-    stopPlayback();
-    state.index = Number(dom.slider.value);
-    requestRender();
+    state.scrubbing = true;
+    scrubTo(Number(dom.slider.value));
   });
-
-  dom.speed.addEventListener('change', () => {
-    state.speed = Number(dom.speed.value) || 1;
+  dom.slider.addEventListener('change', () => {
+    state.scrubbing = false;
+    renderEpoch();
+  });
+  dom.slider.addEventListener('pointerup', () => {
+    state.scrubbing = false;
   });
 
   dom.showLabels.addEventListener('change', () => {
@@ -1143,14 +1285,10 @@ function bindEvents() {
       togglePlayback();
     } else if (event.code === 'ArrowRight') {
       event.preventDefault();
-      stopPlayback();
-      state.index = Math.min(state.epochs.length - 1, state.index + 1);
-      requestRender();
+      stepTime(1);
     } else if (event.code === 'ArrowLeft') {
       event.preventDefault();
-      stopPlayback();
-      state.index = Math.max(0, state.index - 1);
-      requestRender();
+      stepTime(-1);
     }
   });
 

@@ -29,22 +29,27 @@
       </select>
     </label>
 
-    <button id="btn-play" class="button" type="button" disabled>▶ 播放</button>
-
-    <input id="slider" type="range" min="0" max="0" value="0" step="1" disabled />
-
-    <label class="field">
-      <span>倍速</span>
-      <select id="speed">
-        <option value="1">1×</option>
-        <option value="2" selected>2×</option>
-        <option value="5">5×</option>
-        <option value="10">10×</option>
-      </select>
-    </label>
-
     <span id="epoch-label" class="epoch-label">未加载数据</span>
   </header>
+
+  <div class="transport">
+    <button id="btn-back" class="button icon" type="button" disabled title="后退 1 秒（←）">◀ 1s</button>
+    <button id="btn-play" class="button icon play" type="button" disabled title="播放 / 暂停（空格）">▶ 播放</button>
+    <button id="btn-fwd" class="button icon" type="button" disabled title="前进 1 秒（→）">1s ▶</button>
+
+    <div class="rate-group" role="group" aria-label="播放倍速">
+      <button id="rate-1" class="rate active" type="button" data-rate="1" disabled>1×</button>
+      <button id="rate-2" class="rate" type="button" data-rate="2" disabled>2×</button>
+    </div>
+
+    <div class="timeline">
+      <input id="slider" type="range" min="0" max="0" value="0" step="0.1" disabled />
+      <div class="timeline-marks">
+        <span id="time-now">0.0 s</span>
+        <span id="time-total">共 0.0 s</span>
+      </div>
+    </div>
+  </div>
 
   <main>
     <section class="panel map-panel">

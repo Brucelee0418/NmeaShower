@@ -492,6 +492,35 @@ main {
   display: inline-block;
 }
 
+/* 遮挡分割叠加图例 */
+.head-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.ring-marker {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 2px solid #dc2626;
+  display: inline-block;
+}
+
+.band-marker {
+  width: 9px;
+  height: 9px;
+  display: inline-block;
+  background: rgba(13, 148, 136, 0.18);
+  border-left: 2px solid #0f766e;
+  border-right: 2px solid #0f766e;
+}
+
+.sky-note .split-note { color: #0f766e; }
+.sky-note.off .split-note { display: none; }
+
 body.dragging::after {
   content: "松开以加载 NMEA 文件";
   position: fixed;
@@ -535,6 +564,66 @@ body.dragging::after {
   color: var(--muted);
   text-align: center;
   line-height: 1.4;
+}
+
+/* 航向指南针 */
+.compass-gauge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1px 0 2px;
+}
+
+.compass {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-height: 176px;
+  overflow: visible;
+}
+
+.compass-needle {
+  transform-box: view-box;
+  transform-origin: 50% 50%;
+  transition: transform 0.32s cubic-bezier(0.22, 0.8, 0.24, 1);
+}
+
+.compass-face { fill: #fbfdff; }
+.compass-ring { fill: none; stroke: #e2e8f0; stroke-width: 1.5; }
+.compass-tick { stroke: #cbd5e1; stroke-width: 1; }
+.compass-tick.major { stroke: #94a3b8; stroke-width: 1.6; }
+
+.compass-cardinal {
+  font-size: 11px;
+  font-weight: 700;
+  fill: #475569;
+  text-anchor: middle;
+  dominant-baseline: central;
+}
+
+.compass-cardinal.north { fill: #dc2626; }
+
+.compass-value {
+  font-size: 15px;
+  font-weight: 700;
+  fill: #0f172a;
+  text-anchor: middle;
+  dominant-baseline: central;
+  font-variant-numeric: tabular-nums;
+}
+
+.compass-point {
+  font-size: 9px;
+  fill: #64748b;
+  text-anchor: middle;
+  dominant-baseline: central;
+  letter-spacing: 0.08em;
+}
+
+.compass-badge { fill: #ffffff; stroke: #e2e8f0; stroke-width: 1.5; }
+
+@media (prefers-reduced-motion: reduce) {
+  .compass-needle { transition: none; }
 }
 
 .readouts {

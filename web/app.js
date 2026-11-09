@@ -611,10 +611,14 @@ const state = {
   legendCollapsed: false,
   styleFrame: null,
   pendingStyleLayers: new Set(),
+  compassAngle: 0,      // 指南针累计旋转角，用于按最短方向转动
   skyReady: false,
   gaugeReady: false,
   maxSpeedKmh: 10,
   pendingRender: false,
+  split: null,          // sky_split.py 生成的遮挡分割（逐历元曲线 + 逐星概率）
+  showSplit: true,
+  splitWarned: false,
 };
 
 const dom = {};
@@ -988,6 +992,124 @@ function resetLayerStyle() {
 /* ------------------------------------------------------------------ *
  * 星空图
  * ------------------------------------------------------------------ */
+/**
+ * sky_split.py 先生成 `web/sky_split.json`：每个历元两条边界曲线
+ * （半宽随仰角变化）以及每颗卫星的直射概率。这里把它画成
+ *  - 直射带填充（青色扇形）
+ *  - 东 / 西两条边界曲线（实线 = 当前历元，虚线 = 全程估计）
+ *  - 判为非直射卫星的红色圆环
+ */
+function splitAvailable() {
+  const split = state.split;
+  if (!split || !state.showSplit || !split.epochs || !split.epochs.length) return false;
+  if (!split.knots || !split.orientation || !split.global) return false;
+  if (split.epochCount !== state.epochs.length) return false;
+  const epoch = state.epochs[state.index];
+  const saved = split.epochTimes && split.epochTimes[state.index];
+  return !epoch || !saved || !epoch.time || saved === epoch.time;
+}
+
+function splitCurves(index) {
+  const split = state.split;
+  if (!split || !split.epochs[index]) return null;
+  return split.epochs[index];
+}
+
+/** 极坐标下“扇形”多边形的顶点：两条边界 + 地平线弧。 */
+function bandPolygon(center, west, east, knots) {
+  const normalize = (value) => ((value % 360) + 360) % 360;
+  const theta = [];
+  const r = [];
+  for (let i = 0; i < knots.length; i += 1) {
+    theta.push(normalize(center - west[i]));
+    r.push(90 - knots[i]);
+  }
+  for (let i = knots.length - 1; i >= 0; i -= 1) {
+    theta.push(normalize(center + east[i]));
+    r.push(90 - knots[i]);
+  }
+  const start = normalize(center + east[0]);
+  let end = normalize(center - west[0]);
+  if (end > start) end -= 360;
+  for (let i = 1; i < 24; i += 1) {
+    theta.push(normalize(start + ((end - start) * i) / 24));
+    r.push(90);
+  }
+  return { theta, r };
+}
+
+function splitTraces(index) {
+  if (!splitAvailable()) return [];
+  const curves = splitCurves(index);
+  if (!curves) return [];
+  const { centerAzimuth, halfWidth } = state.split.orientation;
+  const knots = state.split.knots;
+  const polygon = bandPolygon(centerAzimuth, curves.west, curves.east, knots);
+  const global = state.split.global;
+  const radius = knots.map((value) => 90 - value);
+  const boundaryTheta = (values, sign) => values.map((value) => (
+    ((centerAzimuth + sign * value) % 360 + 360) % 360));
+
+  return [
+    {
+      type: 'scatterpolar',
+      mode: 'lines',
+      fill: 'toself',
+      fillcolor: 'rgba(13, 148, 136, 0.10)',
+      line: { width: 0 },
+      r: polygon.r,
+      theta: polygon.theta,
+      hoverinfo: 'skip',
+      name: '直射带',
+    },
+    {
+      type: 'scatterpolar',
+      mode: 'lines',
+      r: radius,
+      theta: boundaryTheta(curves.west, -1),
+      line: { color: '#0f766e', width: 2 },
+      hoverinfo: 'skip',
+      name: '西边界',
+    },
+    {
+      type: 'scatterpolar',
+      mode: 'lines',
+      r: radius,
+      theta: boundaryTheta(curves.east, 1),
+      line: { color: '#0f766e', width: 2 },
+      hoverinfo: 'skip',
+      name: '东边界',
+    },
+    {
+      type: 'scatterpolar',
+      mode: 'lines',
+      r: radius,
+      theta: boundaryTheta(global.west, -1),
+      line: { color: '#94a3b8', width: 1, dash: 'dot' },
+      hoverinfo: 'skip',
+      name: '全程西边界',
+    },
+    {
+      type: 'scatterpolar',
+      mode: 'lines',
+      r: radius,
+      theta: boundaryTheta(global.east, 1),
+      line: { color: '#94a3b8', width: 1, dash: 'dot' },
+      hoverinfo: 'skip',
+      name: '全程东边界',
+    },
+    {
+      type: 'scatterpolar',
+      mode: 'lines',
+      r: [0, 90],
+      theta: [centerAzimuth, centerAzimuth],
+      line: { color: '#0f766e', width: 1, dash: 'dash' },
+      hoverinfo: 'skip',
+      name: `朝向 ${centerAzimuth.toFixed(1)}°`,
+    },
+  ];
+}
+
 function skyLayout(hasSatellites = true) {
   return {
     margin: { l: 46, r: 34, t: 16, b: 22 },
@@ -1029,7 +1151,7 @@ function skyLayout(hasSatellites = true) {
   };
 }
 
-function skyData(epoch) {
+function skyData(epoch, index) {
   const satellites = epoch
     ? [...epoch.satellites.values()].filter(
       (satellite) => satellite.elevation !== null
@@ -1040,6 +1162,16 @@ function skyData(epoch) {
 
   const withSignal = satellites.filter((satellite) => satellite.cn0 !== null && satellite.cn0 > 0);
   const withoutSignal = satellites.filter((satellite) => satellite.cn0 === null || satellite.cn0 <= 0);
+
+  // 分割概率（没有对应历元的数据时全为 undefined）
+  const curves = splitAvailable() ? splitCurves(index) : null;
+  const probabilityOf = (satellite) => (
+    curves && curves.p ? curves.p[`${satellite.system}|${satellite.prn}`] : undefined
+  );
+  const probabilityText = (satellite) => {
+    const value = probabilityOf(satellite);
+    return value === undefined ? '—' : value.toFixed(2);
+  };
 
   const label = (satellite) => `${SYSTEM_PREFIX[satellite.system] || ''}${satellite.prn}`;
   const mode = state.showLabels ? 'markers+text' : 'markers';
@@ -1064,6 +1196,7 @@ function skyData(epoch) {
       satellite.elevation,
       satellite.azimuth,
       satellite.cn0,
+      probabilityText(satellite),
     ]),
     textposition: withSignal.map(textPosition),
     textfont: { size: 8, color: '#334155', family: 'system-ui, sans-serif' },
@@ -1089,7 +1222,8 @@ function skyData(epoch) {
     hovertemplate:
       '%{text} · %{customdata[0]}<br>'
       + '仰角 %{customdata[1]:.1f}°　方位 %{customdata[2]:.1f}°<br>'
-      + 'cn0 %{customdata[3]:.1f} dB-Hz<extra></extra>',
+      + 'cn0 %{customdata[3]:.1f} dB-Hz<br>'
+      + 'p(直射) %{customdata[4]}<extra></extra>',
     name: '有信号',
   };
 
@@ -1103,6 +1237,7 @@ function skyData(epoch) {
       satellite.system,
       satellite.elevation,
       satellite.azimuth,
+      probabilityText(satellite),
     ]),
     textposition: withoutSignal.map(textPosition),
     textfont: { size: 8, color: '#64748b', family: 'system-ui, sans-serif' },
@@ -1115,30 +1250,158 @@ function skyData(epoch) {
     hovertemplate:
       '%{text} · %{customdata[0]}<br>'
       + '仰角 %{customdata[1]:.1f}°　方位 %{customdata[2]:.1f}°<br>'
-      + '无载噪比（cn0 = 0）<extra></extra>',
+      + '无载噪比（cn0 = 0）　p(直射) %{customdata[3]}<extra></extra>',
     name: '无信号',
   };
 
-  return [signalTrace, noSignalTrace];
+  // 有信号但被判为非直射的卫星加一圈红环（最需要人工复核的那一类）
+  const nlos = curves
+    ? withSignal.filter((satellite) => {
+      const value = probabilityOf(satellite);
+      return value !== undefined && value < 0.5;
+    })
+    : [];
+  const nlosTrace = {
+    type: 'scatterpolar',
+    mode: 'markers',
+    r: nlos.map((satellite) => 90 - satellite.elevation),
+    theta: nlos.map((satellite) => satellite.azimuth),
+    text: nlos.map(label),
+    customdata: nlos.map(probabilityText),
+    marker: {
+      symbol: 'circle-open',
+      size: 17,
+      color: 'rgba(220, 38, 38, 0)',
+      line: { color: '#dc2626', width: 1.4 },
+    },
+    hovertemplate: '%{text}　判为非直射（p=%{customdata}）<extra></extra>',
+    name: '非直射',
+  };
+
+  return [signalTrace, noSignalTrace, nlosTrace];
 }
 
 function renderSky() {
   const epoch = state.epochs[state.index];
-  const data = skyData(epoch);
-  const hasSatellites = data.some((trace) => trace.r && trace.r.length > 0);
-  Plotly.react('sky', data, skyLayout(hasSatellites), PLOT_CONFIG);
+  const satellites = skyData(epoch, state.index);
+  const hasSatellites = satellites.some((trace) => trace.r && trace.r.length > 0);
+  let overlay = [];
+  try {
+    overlay = splitTraces(state.index);
+  } catch (error) {
+    overlay = [];  // 叠加数据异常时退回纯星空图，不影响主功能
+  }
+  Plotly.react('sky', [...overlay, ...satellites], skyLayout(hasSatellites), PLOT_CONFIG);
   state.skyReady = true;
 }
 
 /* ------------------------------------------------------------------ *
  * 仪表盘
  * ------------------------------------------------------------------ */
+function buildCompass() {
+  const holder = dom.gaugeCourse;
+  if (!holder || holder.__compassBuilt) return;
+  holder.__compassBuilt = true;
+  holder.innerHTML = '';
+
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 200 200');
+  svg.setAttribute('class', 'compass');
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', '航向指南针');
+  holder.appendChild(svg);
+
+  const add = (tag, attrs, parent = svg) => {
+    const node = document.createElementNS(NS, tag);
+    for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+    parent.appendChild(node);
+    return node;
+  };
+
+  add('circle', { class: 'compass-face', cx: 100, cy: 100, r: 96 });
+  add('circle', { class: 'compass-ring', cx: 100, cy: 100, r: 96 });
+  add('circle', { class: 'compass-ring', cx: 100, cy: 100, r: 84 });
+
+  const ticks = add('g', {});
+  for (let degree = 0; degree < 360; degree += 10) {
+    const major = degree % 30 === 0;
+    const radians = ((degree - 90) * Math.PI) / 180;
+    add('line', {
+      class: major ? 'compass-tick major' : 'compass-tick',
+      x1: 100 + Math.cos(radians) * (major ? 79 : 84),
+      y1: 100 + Math.sin(radians) * (major ? 79 : 84),
+      x2: 100 + Math.cos(radians) * 91,
+      y2: 100 + Math.sin(radians) * 91,
+    }, ticks);
+  }
+
+  const needle = add('g', { class: 'compass-needle' });
+  add('polygon', {
+    points: '100,36 107,100 93,100',
+    fill: '#0d9488',
+    stroke: '#ffffff',
+    'stroke-width': 1,
+  }, needle);
+  add('polygon', {
+    points: '100,164 107,100 93,100',
+    fill: '#cbd5e1',
+    stroke: '#ffffff',
+    'stroke-width': 1,
+  }, needle);
+
+  for (const [label, x, y, modifier] of [
+    ['N', 100, 28, ' north'],
+    ['E', 172, 100, ''],
+    ['S', 100, 172, ''],
+    ['W', 28, 100, ''],
+  ]) {
+    const node = add('text', {
+      class: `compass-cardinal${modifier}`,
+      x,
+      y,
+    });
+    node.textContent = label;
+  }
+
+  add('circle', { class: 'compass-badge', cx: 100, cy: 100, r: 30 });
+  const value = add('text', { class: 'compass-value', x: 100, y: 96 });
+  value.textContent = '—';
+  const point = add('text', { class: 'compass-point', x: 100, y: 115 });
+  point.textContent = '';
+
+  dom.compassNeedle = needle;
+  dom.compassValue = value;
+  dom.compassPoint = point;
+}
+
+function updateCompass(course) {
+  if (!dom.compassNeedle || !dom.compassValue) return;
+  if (course === null || !Number.isFinite(course)) {
+    dom.compassValue.textContent = '—';
+    dom.compassPoint.textContent = '无数据';
+    dom.compassNeedle.style.opacity = '0.25';
+    dom.compassNeedle.style.transform = 'rotate(0deg)';
+    state.compassAngle = 0;
+    return;
+  }
+
+  const heading = ((course % 360) + 360) % 360;
+  dom.compassNeedle.style.opacity = '1';
+  dom.compassValue.textContent = `${heading.toFixed(1)}°`;
+  dom.compassPoint.textContent = compassPoint(heading);
+
+  // 选择最短旋转方向，避免 359° -> 0° 时反向转一整圈
+  const current = ((state.compassAngle % 360) + 360) % 360;
+  state.compassAngle += ((heading - current + 540) % 360) - 180;
+  dom.compassNeedle.style.transform = `rotate(${state.compassAngle}deg)`;
+}
+
 function renderGauges() {
   const epoch = state.epochs[state.index];
   if (!epoch) return;
 
   const speed = epoch.speedKmh === null ? 0 : epoch.speedKmh;
-  const course = epoch.course === null ? 0 : epoch.course;
   const maxSpeed = Math.max(10, Math.ceil(state.maxSpeedKmh / 5) * 5);
 
   const speedFigure = {
@@ -1158,39 +1421,12 @@ function renderGauges() {
     layout: { margin: { l: 24, r: 24, t: 10, b: 8 }, paper_bgcolor: 'rgba(0,0,0,0)' },
   };
 
-  const courseFigure = {
-    data: [{
-      type: 'indicator',
-      mode: 'gauge+number',
-      value: course,
-      number: {
-        suffix: '°',
-        valueformat: '.1f',
-        font: { size: 22, color: epoch.course === null ? '#94a3b8' : '#0f172a' },
-      },
-      gauge: {
-        axis: {
-          range: [0, 360],
-          tickvals: [0, 90, 180, 270],
-          ticktext: ['N', 'E', 'S', 'W'],
-          tickwidth: 1,
-          tickfont: { size: 9 },
-        },
-        bar: { color: epoch.course === null ? '#cbd5e1' : '#0d9488', thickness: 0.5 },
-        bgcolor: '#f1f5f9',
-        borderwidth: 0,
-        steps: [{ range: [0, 360], color: '#e2e8f0' }],
-      },
-    }],
-    layout: { margin: { l: 24, r: 24, t: 10, b: 8 }, paper_bgcolor: 'rgba(0,0,0,0)' },
-  };
-
   dom.courseTitle.textContent = epoch.course === null
     ? '航向 · 无数据'
     : `航向 · ${compassPoint(epoch.course)}`;
 
   Plotly.react('gauge-speed', speedFigure.data, speedFigure.layout, PLOT_CONFIG);
-  Plotly.react('gauge-course', courseFigure.data, courseFigure.layout, PLOT_CONFIG);
+  updateCompass(epoch.course);
   state.gaugeReady = true;
 }
 
@@ -1313,10 +1549,7 @@ function requestRender() {
 function resizePlots() {
   if (state.mapReady) Plotly.Plots.resize('map');
   if (state.skyReady) Plotly.Plots.resize('sky');
-  if (state.gaugeReady) {
-    Plotly.Plots.resize('gauge-speed');
-    Plotly.Plots.resize('gauge-course');
-  }
+  if (state.gaugeReady) Plotly.Plots.resize('gauge-speed');
 }
 
 /* ------------------------------------------------------------------ *
@@ -1484,6 +1717,11 @@ function loadText(text, name) {
   renderMap(true);
   renderEpoch();
 
+  if (state.split && state.split.epochCount !== state.epochs.length && !state.splitWarned) {
+    state.splitWarned = true;
+    toast('当前文件与 web/sky_split.json 的历元数不一致，遮挡分割叠加已自动关闭。', true);
+  }
+
   toast(`已加载 ${name}：${state.epochs.length} 个历元，解析 ${elapsed.toFixed(0)} ms`);
   if (state.stats.checksumErrors) {
     toast(`已加载 ${name}（${state.epochs.length} 个历元），但有 ${state.stats.checksumErrors} 条语句校验和错误，已跳过。`, true);
@@ -1499,6 +1737,20 @@ async function loadDefaultFile() {
   } catch (error) {
     toast('无法自动读取 nmea.log，请点击「打开 NMEA 文件」选择文件；'
       + '或先运行 python serve.py 启动本地服务。', true);
+  }
+}
+
+/** 读取 sky_split.py 生成的分割数据；没有该文件时静默降级为纯星空图。 */
+async function loadSplitData() {
+  try {
+    const response = await fetch('/sky_split.json', { cache: 'no-store' });
+    if (!response.ok) return;
+    const payload = await response.json();
+    if (!payload || !Array.isArray(payload.epochs)) return;
+    state.split = payload;
+    if (state.epochs.length) renderSky();
+  } catch (error) {
+    // 没有分割文件或格式不对时保持原样
   }
 }
 
@@ -1523,9 +1775,12 @@ function cacheDom() {
   dom.systemFilter = document.getElementById('system-filter');
   dom.readouts = document.getElementById('readouts');
   dom.courseTitle = document.getElementById('course-title');
+  dom.gaugeCourse = document.getElementById('gauge-course');
   dom.fileInput = document.getElementById('file-input');
   dom.mapStyle = document.getElementById('map-style');
   dom.showLabels = document.getElementById('show-labels');
+  dom.showSplit = document.getElementById('show-split');
+  dom.skyNote = document.querySelector('.sky-note');
 }
 
 function bindEvents() {
@@ -1585,6 +1840,14 @@ function bindEvents() {
     renderSky();
   });
 
+  if (dom.showSplit) {
+    dom.showSplit.addEventListener('change', () => {
+      state.showSplit = dom.showSplit.checked;
+      if (dom.skyNote) dom.skyNote.classList.toggle('off', !state.showSplit);
+      renderSky();
+    });
+  }
+
   document.addEventListener('keydown', (event) => {
     if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) return;
     if (event.code === 'Space') {
@@ -1627,7 +1890,7 @@ function bindEvents() {
         resizePlots();
       });
     });
-    ['map', 'sky', 'gauge-speed', 'gauge-course'].forEach((id) => {
+    ['map', 'sky', 'gauge-speed'].forEach((id) => {
       const element = document.getElementById(id);
       if (element) observer.observe(element);
     });
@@ -1645,6 +1908,7 @@ function init() {
   // 图例样式在首次渲染地图前恢复，保证初始 trace 就用用户的配色
   state.layerStyle = loadLayerStyle();
   buildMapLegend();
+  buildCompass();
 
   // 支持 ?base=gaode-street 这类链接直接指定底图
   const params = new URLSearchParams(location.search);
@@ -1660,6 +1924,7 @@ function init() {
     return;
   }
   loadDefaultFile();
+  loadSplitData();
 }
 
 document.addEventListener('DOMContentLoaded', init);

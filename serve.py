@@ -3,7 +3,7 @@
 
 做两件事：
 
-1. 提供静态文件（``/`` → ``web/index.html``，``/web/*``，``/nmea.log``）；
+1. 提供静态文件（``/`` → ``web/index.html``，``/web/*``，以及根目录下的 NMEA 日志）；
 2. 代理地图瓦片 ``/tiles/{source}/{z}/{x}/{y}``，并缓存到 ``.cache/tiles``。
 
 代理瓦片的原因：浏览器直连外部瓦片服务常被 CORS / 网络策略挡住，而且
@@ -39,6 +39,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 WEB_DIR = ROOT / "web"
 CACHE_DIR = ROOT / ".cache" / "tiles"
+# 允许从根目录直接提供的 NMEA 文件后缀（用于多数据集对比）
+NMEA_SUFFIXES = (".log", ".nmea", ".txt")
 
 # 名称 -> (URL 模板, 缓存扩展名)
 TILE_SOURCES: dict[str, tuple[str, str]] = {
@@ -227,6 +229,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if path == "/nmea.log":
             self._serve_file(ROOT / "nmea.log", cache=False, root=ROOT)
+            return
+
+        # 根目录下的其它 NMEA 日志：多数据集对比时需要从服务器取第二条数据。
+        # 只放行根目录直接子文件，且后缀限定在白名单内。
+        relative_name = path.lstrip("/")
+        if relative_name.lower().endswith(NMEA_SUFFIXES) and "/" not in relative_name:
+            self._serve_file(ROOT / relative_name, cache=False, root=ROOT)
             return
 
         # 其余路径按 web/ 目录解析：既支持 /app.js，也支持 /web/app.js

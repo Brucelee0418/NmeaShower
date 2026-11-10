@@ -16,7 +16,7 @@
     </div>
 
     <label class="button" for="file-input">打开 NMEA 文件</label>
-    <input id="file-input" type="file" accept=".log,.nmea,.txt,text/plain" hidden />
+    <input id="file-input" type="file" accept=".log,.nmea,.txt,text/plain" multiple hidden />
 
     <label class="field">
       <span>底图</span>
@@ -31,6 +31,10 @@
       </select>
     </label>
 
+    <button id="btn-compare" class="button" type="button" aria-pressed="false" title="打开 / 关闭对比曲线浮窗">
+      对比曲线
+    </button>
+
     <span id="epoch-label" class="epoch-label">未加载数据</span>
   </header>
 
@@ -44,12 +48,36 @@
       <button id="rate-2" class="rate" type="button" data-rate="2" disabled>2×</button>
     </div>
 
-    <div class="timeline">
-      <input id="slider" type="range" min="0" max="0" value="0" step="0.1" disabled />
+    <!-- 进度条与时间窗条合二为一：同一条轨道既定位当前时刻，也调整时间窗 -->
+    <div id="timeline" class="timeline">
+      <div id="timeline-track" class="timeline-track is-empty" role="group"
+           aria-label="进度与时间窗：拖动橙色游标定位当前时刻，拖动两端标尺改起止，拖动中间整体平移，点击轨道跳到该时刻">
+        <div id="timeline-span" class="timeline-span">
+          <div id="timeline-progress" class="timeline-progress"></div>
+          <button id="timeline-left" class="timeline-handle left" type="button" role="slider"
+                  aria-label="时间窗开始时间" title="拖动调整开始时间（←/→ 微调 1 s，Shift 为 10 s）"></button>
+          <button id="timeline-right" class="timeline-handle right" type="button" role="slider"
+                  aria-label="时间窗结束时间" title="拖动调整结束时间（←/→ 微调 1 s，Shift 为 10 s）"></button>
+        </div>
+        <button id="timeline-cursor" class="timeline-cursor hidden" type="button" role="slider"
+                aria-label="当前时刻" title="拖动定位当前时刻（点击轨道任意位置也可定位）"></button>
+      </div>
       <div class="timeline-marks">
         <span id="time-now">0.0 s</span>
+        <span id="timeline-readout">无数据</span>
         <span id="time-total">共 0.0 s</span>
       </div>
+    </div>
+
+    <div class="timeline-presets" role="group" aria-label="时间窗预设">
+      <button id="timeline-reset" class="preset" type="button" disabled
+              title="时间窗恢复全时段">全时段</button>
+      <button class="preset" type="button" data-minutes="5" disabled
+              title="时间窗设为 5 分钟（以当前时刻为中心）">5 分钟</button>
+      <button class="preset" type="button" data-minutes="10" disabled
+              title="时间窗设为 10 分钟（以当前时刻为中心）">10 分钟</button>
+      <button class="preset" type="button" data-minutes="20" disabled
+              title="时间窗设为 20 分钟（以当前时刻为中心）">20 分钟</button>
     </div>
   </div>
 
@@ -64,22 +92,28 @@
             <button id="legend-toggle" class="legend-toggle" type="button" aria-expanded="true" title="收起图例">−</button>
           </div>
         </div>
+        <div id="legend-datasets" class="legend-datasets"></div>
+        <div id="legend-divider" class="legend-divider">图层样式</div>
         <div id="legend-rows" class="legend-rows"></div>
       </div>
       <div id="map-info" class="map-info"></div>
     </section>
 
     <aside class="side">
-      <section class="panel sky-panel">
+      <section class="panel sky-panel" data-float-key="sky">
         <div class="panel-head">
           <h2>星空图（卫星分布）</h2>
           <div class="head-tools">
+            <select id="focus-dataset" class="mini-select" title="选择星空图 / 仪表盘显示的数据集"></select>
             <label class="toggle" title="叠加 sky_split.py 生成的遮挡分割">
               <input id="show-split" type="checkbox" checked />
               <span>遮挡分割</span>
             </label>
-            <div id="system-filter" class="chips"></div>
+            <button class="float-btn" type="button" data-float-key="sky" title="浮窗显示 / 还原">⧉</button>
           </div>
+        </div>
+        <div class="chips-bar">
+          <div id="system-filter" class="chips"></div>
         </div>
         <div class="sky-note">
           <span><i class="dot-marker"></i>圆点 = 有载噪比（红→黄→绿随 cn0 升高）</span>
@@ -90,13 +124,16 @@
         <div id="sky" class="plot"></div>
       </section>
 
-      <section class="panel dash-panel">
+      <section class="panel dash-panel" data-float-key="dash">
         <div class="panel-head">
           <h2>仪表盘</h2>
-          <label class="toggle">
-            <input id="show-labels" type="checkbox" checked />
-            <span>星空图标注</span>
-          </label>
+          <div class="head-tools">
+            <label class="toggle">
+              <input id="show-labels" type="checkbox" checked />
+              <span>星空图标注</span>
+            </label>
+            <button class="float-btn" type="button" data-float-key="dash" title="浮窗显示 / 还原">⧉</button>
+          </div>
         </div>
         <div class="dash-grid">
           <div class="gauge-cell">
@@ -112,6 +149,32 @@
       </section>
     </aside>
   </main>
+
+  <section id="compare-window" class="compare-window" hidden>
+    <header class="compare-head">
+      <span class="compare-title">对比曲线</span>
+      <div class="compare-actions">
+        <button id="compare-reset" class="legend-reset" type="button" title="恢复默认指标与数据选择">重置配置</button>
+        <button id="compare-close" class="legend-toggle" type="button" title="关闭">×</button>
+      </div>
+    </header>
+    <div class="compare-config">
+      <div class="compare-config-row">
+        <span class="compare-label">指标</span>
+        <div id="compare-metrics" class="chips"></div>
+      </div>
+      <div class="compare-config-row">
+        <span class="compare-label">对齐</span>
+        <div id="compare-align" class="chips"></div>
+      </div>
+      <div class="compare-config-row">
+        <span class="compare-label">数据</span>
+        <div id="compare-datasets" class="chips"></div>
+      </div>
+    </div>
+    <div id="compare-plot" class="compare-plot"></div>
+    <div class="compare-hint">悬停查看数值 · 点击曲线上的点跳转到该时刻，地图 / 星空图 / 仪表盘一起联动</div>
+  </section>
 
   <div id="toast" class="toast" hidden></div>
 

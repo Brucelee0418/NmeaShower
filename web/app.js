@@ -157,6 +157,10 @@ const COMPARE_METRICS = {
   sats: { name: '卫星数', unit: '颗', digits: 0 },
 };
 const DEFAULT_COMPARE_METRICS = ['speed', 'sats'];
+// 对比曲线默认按绝对 UTC 对齐（同一天多次采集、需要看真实时间关系时更直观）
+const DEFAULT_COMPARE_ALIGN = 'absolute';
+const COMPARE_MIN_WIDTH = 360;
+const COMPARE_MIN_HEIGHT = 260;
 
 /* ------------------------------------------------------------------ *
  * 星空图 / 仪表盘浮窗
@@ -649,7 +653,13 @@ const state = {
   pendingStyleLayers: new Set(),
   pendingRender: false,
   split: null,          // sky_split.py 生成的遮挡分割（逐历元曲线 + 逐星概率）
-  compare: { open: false, metrics: DEFAULT_COMPARE_METRICS.slice(), datasets: new Set(), align: 'relative' },
+  compare: {
+    open: false,
+    metrics: DEFAULT_COMPARE_METRICS.slice(),
+    datasets: new Set(),
+    align: DEFAULT_COMPARE_ALIGN,
+    rect: null,   // 对比窗尺寸 { w, h }，拖动右下角缩放时写入
+  },
   compareReady: false,
   // 时间窗：全局相对秒。start/end 是「时间先后」上的两个标尺，窗口内即为活动区间
   window: { start: 0, end: 0 },
@@ -1145,7 +1155,7 @@ function buildDatasetLegend() {
     name.type = 'button';
     name.className = 'dataset-name';
     name.textContent = dataset.name;
-    name.title = '点击高亮这条数据（顶部时刻与对比曲线「相对起点」以它为参照）';
+    name.title = '点击高亮这条数据；双击把时间窗对齐到这条数据的时段';
 
     const count = document.createElement('span');
     count.className = 'dataset-count';
@@ -1176,6 +1186,13 @@ function buildDatasetLegend() {
 
     row.append(eye, color, name, count, remove, tools);
     dom.legendDatasets.appendChild(row);
+
+    // 双击条目（不含勾选 / 颜色 / 关闭按钮）：时间窗对齐到这条数据自己的起止
+    row.addEventListener('dblclick', (event) => {
+      if (event.target.closest('input, label, .dataset-remove, .win-toggle')) return;
+      event.preventDefault();
+      alignWindowToDataset(dataset);
+    });
 
     visible.addEventListener('change', () => {
       dataset.visible = visible.checked;
@@ -2177,6 +2194,22 @@ function formatUtc(seconds, style = 'none') {
   return clock;
 }
 
+/**
+ * UTC 时刻 → 「本地壁钟与 UTC 相同」的时间戳（ms）。
+ *
+ * Plotly 的日期轴按浏览器本地时区渲染，直接传绝对时间戳会显示成本地时间；
+ * 这里把 UTC 年月日时分秒装进本地 Date，刻度与 hover 就显示 UTC 时钟。
+ * 无夏令时的时区（如中国）完全精确；有 DST 的时区在切换日可能有 1 小时偏差。
+ */
+function utcWallClockMs(epochSeconds) {
+  const utc = new Date(epochSeconds * 1000);
+  return new Date(
+    utc.getUTCFullYear(), utc.getUTCMonth(), utc.getUTCDate(),
+    utc.getUTCHours(), utc.getUTCMinutes(), utc.getUTCSeconds(),
+    utc.getUTCMilliseconds(),
+  ).getTime();
+}
+
 /** 时长文案：多天的绝对时间轴不再用几十万秒表示总长。 */
 function formatDuration(seconds) {
   if (!Number.isFinite(seconds) || seconds <= 0) return '0.0 s';
@@ -2307,9 +2340,17 @@ function applyWindow() {
   if (state.compare.open && state.compareReady) {
     const element = document.getElementById('compare-plot');
     if (element) {
-      const result = full
-        ? Plotly.relayout(element, { 'xaxis.autorange': true })
-        : Plotly.relayout(element, { 'xaxis.range': compareWindowRange() });
+      const layout = {};
+      state.compare.metrics.forEach((key, k) => {
+        const suffix = k === 0 ? '' : String(k + 1);
+        if (full) {
+          layout[`xaxis${suffix}.autorange`] = true;
+        } else {
+          layout[`xaxis${suffix}.range`] = compareWindowRange().slice();
+          layout[`xaxis${suffix}.autorange`] = false;
+        }
+      });
+      const result = Plotly.relayout(element, layout);
       if (result && typeof result.catch === 'function') result.catch(() => {});
     }
   }
@@ -2511,6 +2552,34 @@ function applyWindowMinutes(minutes) {
   const style = utcDateStyle(baseline);
   toast(`时间窗已设为 ${minutes} 分钟（${formatUtc(baseline + state.window.start, style)}–`
     + `${formatUtc(baseline + state.window.end, style)} UTC）`);
+}
+
+/**
+ * 双击图例条目：把时间窗的起止对齐到这条数据自己的时段。
+ * 时间窗坐标是「全局相对秒」（绝对 UTC 合并后的时间轴），
+ * 所以数据集起止要加上 datasetOffset(dataset) 再换算。
+ */
+function alignWindowToDataset(dataset) {
+  if (!dataset || !dataset.times || !dataset.times.length || state.duration <= 0) return;
+  const offset = datasetOffset(dataset);
+  const start = offset + dataset.times[0];
+  const end = offset + dataset.times[dataset.times.length - 1];
+  if (!(end > start)) {
+    toast(`${dataset.name} 没有可用的时间跨度，无法对齐时间窗。`, true);
+    return;
+  }
+
+  state.focusId = dataset.id;
+  updateDatasetLegendFocus();
+  setWindow(start, end);
+  renderEpoch();
+
+  const baseline = utcBaseline();
+  const style = utcDateStyle(baseline);
+  const range = baseline === null
+    ? `${start.toFixed(1)}–${end.toFixed(1)} s`
+    : `${formatUtc(baseline + start, style)}–${formatUtc(baseline + end, style)} UTC`;
+  toast(`时间窗已对齐到 ${dataset.name}：${range}（${formatDuration(end - start)}）`);
 }
 
 /** 把全局时间设为绝对 UTC 秒（会夹到有效范围内）。 */
@@ -2809,12 +2878,14 @@ function updateDatasetLegendFocus() {
 function setFocus(id) {
   if (!state.datasets.some((dataset) => dataset.id === id)) return;
   state.focusId = id;
-  buildDatasetLegend();
+  // 只换高亮，不重建图例行：双击图例条目时第二下仍要落在同一个元素上
+  updateDatasetLegendFocus();
   // 必须走完整的 renderEpoch：切换后顶部标签 / 时间轴 / 地图当前位置都要跟着变，
   // 只重画局部会留下上一个数据集的历元信息。
   renderEpoch();
-  // 对比曲线用「相对起点」对齐时，x 轴与光标以聚焦数据为参照，换焦点要重画
-  if (state.compare.open) renderCompare();
+  // 相对起点对齐时 x 轴与光标以聚焦数据为参照，换焦点必须重画；
+  // 绝对 UTC 对齐时坐标不变，保留用户对曲线的缩放。
+  if (state.compare.open && state.compare.align === 'relative') renderCompare();
 }
 
 /** 把一份 NMEA 文本添加为一条数据集。 */
@@ -3385,6 +3456,13 @@ function loadCompareConfig() {
     if (saved && (saved.align === 'absolute' || saved.align === 'relative')) {
       state.compare.align = saved.align;
     }
+    const rect = saved && saved.rect;
+    if (rect && Number.isFinite(rect.w) && Number.isFinite(rect.h)) {
+      state.compare.rect = {
+        w: Math.max(COMPARE_MIN_WIDTH, rect.w),
+        h: Math.max(COMPARE_MIN_HEIGHT, rect.h),
+      };
+    }
   } catch (error) {
     // 忽略损坏的配置
   }
@@ -3395,6 +3473,7 @@ function saveCompareConfig() {
     localStorage.setItem(COMPARE_KEY, JSON.stringify({
       metrics: state.compare.metrics,
       align: state.compare.align,
+      rect: state.compare.rect,
     }));
   } catch (error) {
     // localStorage 不可用时忽略
@@ -3435,15 +3514,45 @@ function compareFocusShift() {
   return focus ? datasetOffset(focus) : 0;
 }
 
+/**
+ * 对比曲线 x 轴数值：
+ *  - 绝对 UTC 对齐（有 UTC 基准）：返回日期轴用的 UTC 壁钟毫秒数，刻度/hover 显示 UTC；
+ *  - 相对起点对齐 / 数据没有时间戳：仍然用相对秒。
+ */
+function compareAxisValue(relativeSeconds) {
+  if (state.compare.align !== 'absolute') return relativeSeconds;
+  const baseline = utcBaseline();
+  if (baseline === null) return relativeSeconds;
+  return utcWallClockMs(baseline + relativeSeconds);
+}
+
+/**
+ * 日期轴的 range 端点 → 轴上的「UTC 壁钟毫秒」。
+ * Plotly 会把日期轴的 range 存成 'YYYY-MM-DD HH:MM:SS.sss' 字符串（按本地时区解析会偏时区），
+ * 这里按 UTC 解析后再转回壁钟毫秒，缩放按钮反复点击才不会漂移。
+ */
+function compareAxisMs(value) {
+  if (typeof value === 'number') return value;
+  const text = String(value || '').trim();
+  if (!text) return NaN;
+  const iso = /[zZ]|[+-]\d\d:?\d\d$/.test(text) ? text : `${text.replace(' ', 'T')}Z`;
+  const parsed = Date.parse(iso);
+  return Number.isFinite(parsed) ? utcWallClockMs(parsed / 1000) : NaN;
+}
+
 /** 全局绝对秒 → 对比曲线 x 坐标。 */
 function compareX(seconds) {
-  return Math.max(0, (seconds - state.origin) - compareFocusShift());
+  const relative = Math.max(0, (seconds - state.origin) - compareFocusShift());
+  return compareAxisValue(relative);
 }
 
 /** 时间窗在对比曲线 x 轴上的区间。 */
 function compareWindowRange() {
   const shift = compareFocusShift();
-  return [state.window.start - shift, state.window.end - shift];
+  return [
+    compareAxisValue(state.window.start - shift),
+    compareAxisValue(state.window.end - shift),
+  ];
 }
 
 /** 把数据集转换成对比曲线坐标（相对起点对齐时 x 从 0 开始）。 */
@@ -3452,7 +3561,7 @@ function compareSeries(dataset, key) {
   const x = [];
   const y = [];
   for (let i = 0; i < dataset.epochs.length; i += 1) {
-    x.push(dataset.times[i] + offset);
+    x.push(compareAxisValue(dataset.times[i] + offset));
     y.push(compareValue(dataset, dataset.epochs[i], key));
   }
   return { x, y };
@@ -3485,7 +3594,11 @@ function compareFigure(metrics, datasets) {
     shapes: [cursorShape(compareX(state.now))],
   };
 
+  const absoluteDateAxis = state.compare.align === 'absolute' && utcBaseline() !== null;
+  const dateStyle = absoluteDateAxis ? utcDateStyle(utcBaseline()) : 'none';
+
   const count = metrics.length;
+  const suffixList = metrics.map((key, index) => (index === 0 ? '' : String(index + 1)));
   metrics.forEach((key, k) => {
     const meta = COMPARE_METRICS[key];
     const suffix = k === 0 ? '' : String(k + 1);
@@ -3522,15 +3635,56 @@ function compareFigure(metrics, datasets) {
         showlegend: k === 0,
         line: { color: dataset.color, width: 1.6 },
         connectgaps: false,
-        hovertemplate: `${dataset.name}　%{x:.1f} s<br>%{y:.2f} ${meta.unit}<extra></extra>`,
+        hovertemplate: absoluteDateAxis
+          ? `${dataset.name}　%{y:.2f} ${meta.unit}<extra></extra>`
+          : `${dataset.name}　%{x:.1f} s<br>%{y:.2f} ${meta.unit}<extra></extra>`,
       });
     }
   });
 
   // 对比曲线只看时间窗内的区间（窗口为全时段时交给 Plotly 自适应）
   // 必须写在子图轴构建之后，否则会被 k=0 的 xaxis 定义覆盖。
+  // 每个子图的 x 轴都写上区间：matches 同步在首次绘制时不一定生效。
   if (!windowIsFull()) {
-    layout.xaxis = { ...(layout.xaxis || {}), range: compareWindowRange(), autorange: false };
+    const range = compareWindowRange();
+    for (const suffix of suffixList) {
+      layout[`xaxis${suffix}`] = {
+        ...(layout[`xaxis${suffix}`] || {}),
+        range: range.slice(),
+        autorange: false,
+      };
+    }
+  }
+
+  // 绝对 UTC 对齐：x 轴用日期刻度，刻度/hover 都显示 UTC 时钟而不是几十万秒
+  if (absoluteDateAxis) {
+    for (const suffix of suffixList) {
+      layout[`xaxis${suffix}`] = {
+        ...(layout[`xaxis${suffix}`] || {}),
+        type: 'date',
+        hoverformat: dateStyle === 'year'
+          ? '%Y-%m-%d %H:%M:%S'
+          : (dateStyle === 'month' ? '%m-%d %H:%M:%S' : '%H:%M:%S'),
+        tickformatstops: [
+          { dtickrange: [null, 1000], value: '%H:%M:%S.%L' },
+          { dtickrange: [1000, 60000], value: '%H:%M:%S' },
+          { dtickrange: [60000, 3600000], value: '%H:%M' },
+          { dtickrange: [3600000, 86400000], value: '%m-%d %H:%M' },
+          { dtickrange: [86400000, 31536000000], value: '%m-%d' },
+          { dtickrange: [31536000000, null], value: '%Y-%m' },
+        ],
+      };
+    }
+  } else {
+    // 从日期轴切回相对秒时要把日期格式显式清掉，否则 Plotly.react 会沿用旧配置
+    for (const suffix of suffixList) {
+      layout[`xaxis${suffix}`] = {
+        ...(layout[`xaxis${suffix}`] || {}),
+        type: 'linear',
+        hoverformat: '',
+        tickformatstops: [],
+      };
+    }
   }
 
   return { data, layout };
@@ -3647,16 +3801,25 @@ function buildCompareChips() {
   }
 }
 
-/** 对比窗首次打开时避开右侧面板；用户拖过之后不再自动摆位。 */
+/** 对比窗首次打开时摆到地图左侧（图例右边）；用户拖过 / 缩放过后不再自动摆位。 */
 function placeCompareWindow() {
   const element = dom.compareWindow;
   if (!element || element.dataset.placed === '1') return;
-  const width = Math.min(620, window.innerWidth - 24);
-  const height = Math.min(420, Math.max(240, window.innerHeight - 140));
+  const saved = state.compare.rect || {};
+  const maxWidth = Math.max(COMPARE_MIN_WIDTH, window.innerWidth - 24);
+  const maxHeight = Math.max(COMPARE_MIN_HEIGHT, window.innerHeight - 100);
+  const width = Math.min(maxWidth, Math.max(COMPARE_MIN_WIDTH, saved.w || 620));
+  const height = Math.min(maxHeight, Math.max(COMPARE_MIN_HEIGHT, saved.h || 420));
+  // 上方留出顶栏 / 控制条，左边避开地图图例，下方留出继续放大的空间
+  const left = Math.max(12, Math.min(window.innerWidth - width - 12, 320));
+  const top = Math.min(
+    Math.max(60, transportBottom() + 8),
+    Math.max(60, window.innerHeight - height - 80),
+  );
   element.style.width = `${width}px`;
   element.style.height = `${height}px`;
-  element.style.left = `${Math.max(12, window.innerWidth - width - 480)}px`;
-  element.style.top = `${Math.max(60, window.innerHeight - height - 16)}px`;
+  element.style.left = `${left}px`;
+  element.style.top = `${top}px`;
   element.style.right = 'auto';
   element.style.bottom = 'auto';
   element.dataset.placed = '1';
@@ -3687,12 +3850,102 @@ function setAlign(align) {
 
 function resetCompare() {
   state.compare.metrics = DEFAULT_COMPARE_METRICS.slice();
-  state.compare.align = 'relative';
+  state.compare.align = DEFAULT_COMPARE_ALIGN;
   state.compare.datasets = new Set(state.datasets.map((dataset) => dataset.id));
   saveCompareConfig();
   buildCompareChips();
   renderCompare();
-  toast('对比配置已恢复默认');
+  toast('对比配置已恢复默认（绝对 UTC 对齐）');
+}
+
+function rememberCompareRect() {
+  if (!dom.compareWindow) return;
+  const rect = dom.compareWindow.getBoundingClientRect();
+  state.compare.rect = { w: Math.round(rect.width), h: Math.round(rect.height) };
+  saveCompareConfig();
+}
+
+/** 拖右下角缩放对比窗；尺寸写入 localStorage，图表由 ResizeObserver 重排。 */
+function attachCompareResize() {
+  const element = dom.compareWindow;
+  const handle = element && element.querySelector('.float-resize');
+  if (!handle || handle.__resizeBound) return;
+  handle.__resizeBound = true;
+
+  handle.addEventListener('pointerdown', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = element.getBoundingClientRect();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const startWidth = rect.width;
+    const startHeight = rect.height;
+
+    const onMove = (moveEvent) => {
+      const width = Math.max(COMPARE_MIN_WIDTH, Math.min(
+        window.innerWidth - rect.left - 4,
+        startWidth + moveEvent.clientX - startX,
+      ));
+      const height = Math.max(COMPARE_MIN_HEIGHT, Math.min(
+        window.innerHeight - rect.top - 4,
+        startHeight + moveEvent.clientY - startY,
+      ));
+      element.style.width = `${width}px`;
+      element.style.height = `${height}px`;
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      rememberCompareRect();
+      if (state.compareReady) {
+        try { Plotly.Plots.resize('compare-plot'); } catch (error) { /* 忽略 */ }
+      }
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  });
+}
+
+/**
+ * 对比曲线缩放：x 轴按比例收放，各子图的 x 轴通过 matches 一起跟随。
+ * 滚轮缩放由 Plotly 的 scrollZoom 负责，这里的按钮走同一套 x 轴范围。
+ */
+function compareZoom(factor) {
+  if (!state.compare.open) return;
+  const element = document.getElementById('compare-plot');
+  const axis = element && element._fullLayout && element._fullLayout.xaxis;
+  if (!axis || !axis.range) return;
+  const left = compareAxisMs(axis.range[0]);
+  const right = compareAxisMs(axis.range[1]);
+  if (!Number.isFinite(left) || !Number.isFinite(right)) return;
+  const center = (left + right) / 2;
+  // 日期轴的单位是毫秒，线性轴是秒；最小可视跨度分别取 1 s
+  const minimumHalf = axis.type === 'date' ? 500 : 0.25;
+  const half = Math.max(minimumHalf, ((right - left) / 2) * factor);
+  const result = Plotly.relayout(element, { 'xaxis.range': [center - half, center + half] });
+  if (result && typeof result.catch === 'function') result.catch(() => {});
+}
+
+/** 对比曲线缩放复位：x 轴回到时间窗区间（全时段时自适应），各 y 轴重新自适应。 */
+function resetCompareZoom() {
+  if (!state.compare.open) return;
+  const element = document.getElementById('compare-plot');
+  if (!element) return;
+  const full = windowIsFull();
+  const range = full ? null : compareWindowRange();
+  const layout = {};
+  state.compare.metrics.forEach((key, k) => {
+    const suffix = k === 0 ? '' : String(k + 1);
+    if (full) {
+      layout[`xaxis${suffix}.autorange`] = true;
+    } else {
+      layout[`xaxis${suffix}.range`] = range.slice();
+      layout[`xaxis${suffix}.autorange`] = false;
+    }
+    layout[`yaxis${suffix}.autorange`] = true;
+  });
+  const result = Plotly.relayout(element, layout);
+  if (result && typeof result.catch === 'function') result.catch(() => {});
 }
 
 /** 对比曲线上的点 → 全局时间 + 当前数据集，带动地图 / 星空图 / 仪表盘。 */
@@ -3700,19 +3953,25 @@ function bindCompareClick() {
   const element = document.getElementById('compare-plot');
   if (!element || typeof element.on !== 'function' || element.__compareClickBound) return;
   element.__compareClickBound = true;
+  // 双击图表：等 Plotly 内置的 reset 落定后，再按当前时间窗复位缩放
+  element.on('plotly_doubleclick', () => setTimeout(resetCompareZoom, 0));
   element.on('plotly_click', (event) => {
     const point = event.points && event.points[0];
     if (!point) return;
-    const seconds = Number(point.x);
-    if (!Number.isFinite(seconds)) return;
-    stopPlayback();
     const datasetId = point.data && point.data.meta && point.data.meta.datasetId;
     const dataset = datasetId ? state.datasets.find((item) => item.id === datasetId) : null;
-    // 相对起点对齐时 x 是数据集自身时间轴上的秒数，换算回绝对时间要加回它的起点；
-    // 绝对 UTC 对齐时 x 已经是全局相对秒，直接用。
-    const shift = dataset && state.compare.align === 'relative' ? datasetOffset(dataset) : 0;
-    // 先定位时间再切数据集：顺序反了会先按旧时刻重画一帧，界面会闪一下旧数据
-    setGlobalTime(state.origin + seconds + shift);
+    // 绝对 UTC 对齐时 x 轴是日期轴，point.x 是格式化后的日期，不能直接当秒用；
+    // 按点下标回到数据集自己的时间轴最稳（相对起点对齐也适用）。
+    const index = Number(point.pointNumber);
+    let relative = null;
+    if (dataset && Number.isInteger(index) && Number.isFinite(dataset.times[index])) {
+      relative = datasetOffset(dataset) + dataset.times[index];
+    } else if (state.compare.align === 'relative' && Number.isFinite(Number(point.x))) {
+      relative = Number(point.x);
+    }
+    if (relative === null) return;
+    // 图表被平移/缩放后可能点到时间窗外的点：让时间窗跟过去，保持游标与读数一致
+    seekTo(relative, { followWindow: true });
     if (datasetId) setFocus(datasetId);
     else renderEpoch();
   });
@@ -3789,6 +4048,9 @@ function cacheDom() {
   dom.compareReset = document.getElementById('compare-reset');
   dom.compareClose = document.getElementById('compare-close');
   dom.comparePlot = document.getElementById('compare-plot');
+  dom.compareZoomIn = document.getElementById('compare-zoom-in');
+  dom.compareZoomOut = document.getElementById('compare-zoom-out');
+  dom.compareZoomReset = document.getElementById('compare-zoom-reset');
 }
 
 function bindEvents() {
@@ -3845,8 +4107,18 @@ function bindEvents() {
   if (dom.compareReset) {
     dom.compareReset.addEventListener('click', resetCompare);
   }
+  if (dom.compareZoomIn) {
+    dom.compareZoomIn.addEventListener('click', () => compareZoom(0.7));
+  }
+  if (dom.compareZoomOut) {
+    dom.compareZoomOut.addEventListener('click', () => compareZoom(1.45));
+  }
+  if (dom.compareZoomReset) {
+    dom.compareZoomReset.addEventListener('click', resetCompareZoom);
+  }
   if (dom.compareWindow) {
     attachWindowDrag(dom.compareWindow, dom.compareWindow.querySelector('.compare-head'));
+    attachCompareResize();
     dom.compareWindow.addEventListener('pointerdown', () => bringToFront(dom.compareWindow));
   }
 

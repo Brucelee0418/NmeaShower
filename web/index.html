@@ -106,7 +106,10 @@
     <header class="compare-head">
       <span class="compare-title">对比曲线</span>
       <div class="compare-actions">
-        <button id="compare-reset" class="legend-reset" type="button" title="恢复默认指标与数据选择">重置配置</button>
+        <button id="compare-zoom-out" class="legend-reset" type="button" title="曲线缩小（滚轮也可缩放）">−</button>
+        <button id="compare-zoom-in" class="legend-reset" type="button" title="曲线放大（滚轮也可缩放）">+</button>
+        <button id="compare-zoom-reset" class="legend-reset" type="button" title="缩放复位到时间窗范围（双击图表也可复位）">复位</button>
+        <button id="compare-reset" class="legend-reset" type="button" title="恢复默认指标、对齐与数据选择">重置配置</button>
         <button id="compare-close" class="legend-toggle" type="button" title="关闭">×</button>
       </div>
     </header>
@@ -125,7 +128,8 @@
       </div>
     </div>
     <div id="compare-plot" class="compare-plot"></div>
-    <div class="compare-hint">悬停查看数值 · 点击曲线上的点跳转到该时刻，地图 / 星空图 / 仪表盘一起联动</div>
+    <div class="compare-hint">滚轮缩放 · 拖拽平移 · 双击复位 · 悬停查看数值 · 点击曲线上的点跳转到该时刻</div>
+    <div class="float-resize" title="拖动调整大小"></div>
   </section>
 
   <div id="toast" class="toast" hidden></div>

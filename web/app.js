@@ -147,7 +147,6 @@ const DATASET_PALETTE = [
   '#0891b2', '#db2777', '#65a30d', '#0d9488', '#9333ea',
 ];
 const DATASET_STYLE_KEY = 'nmea.datasetStyle.v1';
-const FLOAT_KEY = 'nmea.floatLayout.v1';
 const COMPARE_KEY = 'nmea.compareConfig.v1';
 
 // 对比曲线指标：每个指标一张独立子图，避免量纲混在一根 y 轴上
@@ -158,6 +157,19 @@ const COMPARE_METRICS = {
   sats: { name: '卫星数', unit: '颗', digits: 0 },
 };
 const DEFAULT_COMPARE_METRICS = ['speed', 'sats'];
+
+/* ------------------------------------------------------------------ *
+ * 星空图 / 仪表盘浮窗
+ * ------------------------------------------------------------------ */
+// 每条轨迹各有一套星空图和仪表盘，都是可拖动、可缩放的独立浮窗
+const WINDOW_KINDS = {
+  sky: { title: '星空图', width: 360, height: 330, minWidth: 260, minHeight: 190 },
+  dash: { title: '仪表盘', width: 430, height: 360, minWidth: 300, minHeight: 220 },
+};
+const WINDOW_ORDER = ['sky', 'dash'];
+const WINDOW_LAYOUT_KEY = 'nmea.windowLayout.v1';
+const DEFAULT_SHOW_LABELS = true;
+const DEFAULT_SHOW_SPLIT = true;
 
 /* ------------------------------------------------------------------ *
  * WGS84 -> GCJ-02（高德/腾讯底图使用 GCJ-02，不纠偏会偏移几百米）
@@ -618,7 +630,7 @@ function summarize(epochs) {
 const state = {
   datasets: [],       // 多条数据的集合，顺序即图例顺序
   datasetSeq: 0,
-  focusId: null,      // 星空图 / 仪表盘当前展示的数据集
+  focusId: null,      // 顶部时刻标签 / 对比曲线「相对起点」参照的数据集
   now: 0,             // 全局绝对时间（UTC 秒），所有视图的时间基准
   origin: 0,          // 轨道 0 点对应的绝对秒
   duration: 0,        // 全部数据集覆盖的时间跨度
@@ -627,8 +639,6 @@ const state = {
   playAnchorWall: 0,  // 播放起点的墙钟时间
   playAnchorTime: 0,  // 播放起点的数据时间
   rafHandle: null,
-  activeSystems: new Set(),
-  showLabels: true,
   mapSource: 'arcgis-imagery',
   view: null,          // 手动缩放/平移后的视野 { zoom, center }，重建地图时沿用
   mapReady: false,
@@ -637,23 +647,21 @@ const state = {
   legendCollapsed: false,
   styleFrame: null,
   pendingStyleLayers: new Set(),
-  compassAngle: 0,      // 指南针累计旋转角，用于按最短方向转动
-  skyReady: false,
-  gaugeReady: false,
   pendingRender: false,
   split: null,          // sky_split.py 生成的遮挡分割（逐历元曲线 + 逐星概率）
-  showSplit: true,
   compare: { open: false, metrics: DEFAULT_COMPARE_METRICS.slice(), datasets: new Set(), align: 'relative' },
   compareReady: false,
   // 时间窗：全局相对秒。start/end 是「时间先后」上的两个标尺，窗口内即为活动区间
   window: { start: 0, end: 0 },
   windowFrame: null,
   timelineDrag: null,   // 轨道上的拖动状态：改标尺 / 平移窗口 / 定位当前时刻
-  floats: {},           // 浮窗位置：{ sky: {x,y,w,h}, dash: {...} }
+  windowLayout: {},     // 浮窗位置：{ 'sky:文件名': {x,y,w,h} }
+  resizeObserver: null,
+  resizeFrame: null,
   floatZ: 41,
 };
 
-/** 当前用于星空图 / 仪表盘 / 读数的数据集。 */
+/** 顶部时刻标签使用的数据集（星空图 / 仪表盘已经各自绑定到自己的数据集）。 */
 function focusDataset() {
   if (!state.datasets.length) return null;
   return state.datasets.find((dataset) => dataset.id === state.focusId) || state.datasets[0];
@@ -677,6 +685,13 @@ const dom = {};
 function fmt(value, digits = 2) {
   if (value === null || value === undefined || !Number.isFinite(value)) return '—';
   return value.toFixed(digits);
+}
+
+/** 文件名等外部文本拼进 innerHTML 前先转义。 */
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[char]));
 }
 
 function compassPoint(degrees) {
@@ -1100,6 +1115,7 @@ function buildDatasetLegend() {
     empty.className = 'dataset-empty';
     empty.textContent = '拖入一个或多个 NMEA 文件以开始对比';
     dom.legendDatasets.appendChild(empty);
+    updateLegendWindowsButton();
     return;
   }
 
@@ -1129,7 +1145,7 @@ function buildDatasetLegend() {
     name.type = 'button';
     name.className = 'dataset-name';
     name.textContent = dataset.name;
-    name.title = '点击设为星空图 / 仪表盘的当前数据';
+    name.title = '点击高亮这条数据（顶部时刻与对比曲线「相对起点」以它为参照）';
 
     const count = document.createElement('span');
     count.className = 'dataset-count';
@@ -1141,7 +1157,24 @@ function buildDatasetLegend() {
     remove.textContent = '×';
     remove.title = '移除这条数据';
 
-    row.append(eye, color, name, count, remove);
+    // 每条轨迹各自的星空图 / 仪表盘开关（浮窗）
+    const tools = document.createElement('div');
+    tools.className = 'dataset-tools';
+    for (const kind of WINDOW_ORDER) {
+      const open = Boolean(dataset.windows && dataset.windows[kind]);
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'win-toggle';
+      toggle.dataset.kind = kind;
+      toggle.textContent = WINDOW_KINDS[kind].title;
+      toggle.classList.toggle('on', open);
+      toggle.setAttribute('aria-pressed', String(open));
+      toggle.title = `${open ? '关闭' : '打开'} ${dataset.name} 的${WINDOW_KINDS[kind].title}`;
+      toggle.addEventListener('click', () => toggleDatasetWindow(dataset, kind));
+      tools.appendChild(toggle);
+    }
+
+    row.append(eye, color, name, count, remove, tools);
     dom.legendDatasets.appendChild(row);
 
     visible.addEventListener('change', () => {
@@ -1156,6 +1189,7 @@ function buildDatasetLegend() {
     color.addEventListener('input', () => {
       dataset.color = color.value;
       rememberDatasetStyle(dataset);
+      refreshWindowChrome(dataset);
       // 图层预览里的轨迹线/点颜色跟随数据集，也要一起刷新
       for (const meta of MAP_LAYER_META) {
         if (meta.colorSource === 'dataset') refreshLegendRow(meta.key);
@@ -1167,6 +1201,23 @@ function buildDatasetLegend() {
     });
     name.addEventListener('click', () => setFocus(dataset.id));
     remove.addEventListener('click', () => removeDataset(dataset.id));
+  }
+  updateLegendWindowsButton();
+}
+
+/** 数据集换色时，同步浮窗标题色点、指南针指针与仪表盘配色。 */
+function refreshWindowChrome(dataset) {
+  if (!dataset.windows) return;
+  for (const kind of WINDOW_ORDER) {
+    const win = dataset.windows[kind];
+    if (!win) continue;
+    const dot = win.el.querySelector('.win-dot');
+    if (dot) dot.style.background = dataset.color;
+    if (win.compass) {
+      const north = win.compass.needle.firstElementChild;
+      if (north) north.setAttribute('fill', dataset.color);
+    }
+    if (kind === 'dash') renderDashWindow(win);
   }
 }
 
@@ -1328,7 +1379,7 @@ function resetLayerStyle() {
  */
 function splitAvailable(dataset) {
   const split = state.split;
-  if (!split || !state.showSplit || !dataset) return false;
+  if (!split || !dataset || dataset.showSplit === false) return false;
   if (!split.epochs || !split.epochs.length) return false;
   if (!split.knots || !split.orientation || !split.global) return false;
   if (split.epochCount !== dataset.epochs.length) return false;
@@ -1491,11 +1542,13 @@ function skyLayout(hasSatellites = true, message = null) {
 
 function skyData(dataset) {
   const epoch = currentEpoch(dataset);
+  // 星座过滤 / 卫星标注都是「每条轨迹自己一套」，互相不影响
+  const systems = dataset.activeSystems || new Set();
   const satellites = epoch
     ? [...epoch.satellites.values()].filter(
       (satellite) => satellite.elevation !== null
         && satellite.azimuth !== null
-        && state.activeSystems.has(satellite.system),
+        && systems.has(satellite.system),
     )
     : [];
 
@@ -1513,7 +1566,7 @@ function skyData(dataset) {
   };
 
   const label = (satellite) => `${SYSTEM_PREFIX[satellite.system] || ''}${satellite.prn}`;
-  const mode = state.showLabels ? 'markers+text' : 'markers';
+  const mode = dataset.showLabels === false ? 'markers' : 'markers+text';
 
   // 按方位把标签推到圆点外侧，避免密集时标签互相遮盖
   const textPosition = (satellite) => {
@@ -1620,25 +1673,33 @@ function skyData(dataset) {
   return [signalTrace, noSignalTrace, nlosTrace];
 }
 
-function renderSky() {
-  const dataset = focusDataset();
+/** 把某条轨迹的星空图画进它自己的浮窗。 */
+function renderSkyWindow(win) {
+  const dataset = win && win.dataset;
+  const element = win && win.plotEl;
+  if (!element) return;
+  const emptyTrace = [{
+    type: 'scatterpolar', mode: 'markers', r: [], theta: [], hoverinfo: 'skip', name: '无数据',
+  }];
+
   if (!dataset) {
-    Plotly.react('sky', [{
-      type: 'scatterpolar', mode: 'markers', r: [], theta: [], hoverinfo: 'skip', name: '无数据',
-    }], skyLayout(false), PLOT_CONFIG);
-    state.skyReady = true;
+    Plotly.react(element, emptyTrace, skyLayout(false), PLOT_CONFIG);
+    win.ready = true;
     return;
   }
 
   // 当前时刻超出该数据范围时不画端点帧的星图，用说明代替，避免误读
   const status = datasetState(dataset);
   if (status !== 'ok') {
-    const where = status === 'before' ? '早于该数据起点' : '晚于该数据末尾';
+    const where = status === 'before' ? '早于起点' : '晚于末尾';
     // 保留一条空 trace，否则 Plotly 会退回默认直角坐标轴，极坐标网格消失
-    Plotly.react('sky', [{
-      type: 'scatterpolar', mode: 'markers', r: [], theta: [], hoverinfo: 'skip', name: '无数据',
-    }], skyLayout(false, `当前时刻${where}（覆盖 ${datasetRangeText(dataset)}）`), PLOT_CONFIG);
-    state.skyReady = true;
+    Plotly.react(
+      element,
+      emptyTrace,
+      skyLayout(false, `当前时刻${where}<br>覆盖 ${datasetRangeText(dataset)}`),
+      PLOT_CONFIG,
+    );
+    win.ready = true;
     return;
   }
 
@@ -1650,17 +1711,25 @@ function renderSky() {
   } catch (error) {
     overlay = [];  // 叠加数据异常时退回纯星空图，不影响主功能
   }
-  Plotly.react('sky', [...overlay, ...satellites], skyLayout(hasSatellites), PLOT_CONFIG);
-  state.skyReady = true;
+  Plotly.react(element, [...overlay, ...satellites], skyLayout(hasSatellites), PLOT_CONFIG);
+  win.ready = true;
+}
+
+/** 重新画所有已打开的星空图（例如遮挡分割数据延后加载完成）。 */
+function renderSkyWindows() {
+  for (const dataset of state.datasets) {
+    const win = dataset.windows && dataset.windows.sky;
+    if (win) renderSkyWindow(win);
+  }
 }
 
 /* ------------------------------------------------------------------ *
- * 仪表盘
+ * 仪表盘（每条轨迹一套，各自画在自己的浮窗里）
  * ------------------------------------------------------------------ */
-function buildCompass() {
-  const holder = dom.gaugeCourse;
-  if (!holder || holder.__compassBuilt) return;
-  holder.__compassBuilt = true;
+/** 在浮窗里建指南针 SVG；指针颜色跟随该轨迹的配色。 */
+function buildCompass(win) {
+  const holder = win && win.compassEl;
+  if (!holder) return;
   holder.innerHTML = '';
 
   const NS = 'http://www.w3.org/2000/svg';
@@ -1698,7 +1767,7 @@ function buildCompass() {
   const needle = add('g', { class: 'compass-needle' });
   add('polygon', {
     points: '100,36 107,100 93,100',
-    fill: '#0d9488',
+    fill: (win.dataset && win.dataset.color) || '#0d9488',
     stroke: '#ffffff',
     'stroke-width': 1,
   }, needle);
@@ -1729,36 +1798,38 @@ function buildCompass() {
   const point = add('text', { class: 'compass-point', x: 100, y: 115 });
   point.textContent = '';
 
-  dom.compassNeedle = needle;
-  dom.compassValue = value;
-  dom.compassPoint = point;
+  win.compass = { needle, value, point };
+  win.angle = 0;
 }
 
-function updateCompass(course) {
-  if (!dom.compassNeedle || !dom.compassValue) return;
+function updateCompass(win, course) {
+  const compass = win && win.compass;
+  if (!compass) return;
   if (course === null || !Number.isFinite(course)) {
-    dom.compassValue.textContent = '—';
-    dom.compassPoint.textContent = '无数据';
-    dom.compassNeedle.style.opacity = '0.25';
-    dom.compassNeedle.style.transform = 'rotate(0deg)';
-    state.compassAngle = 0;
+    compass.value.textContent = '—';
+    compass.point.textContent = '无数据';
+    compass.needle.style.opacity = '0.25';
+    compass.needle.style.transform = 'rotate(0deg)';
+    win.angle = 0;
     return;
   }
 
   const heading = ((course % 360) + 360) % 360;
-  dom.compassNeedle.style.opacity = '1';
-  dom.compassValue.textContent = `${heading.toFixed(1)}°`;
-  dom.compassPoint.textContent = compassPoint(heading);
+  compass.needle.style.opacity = '1';
+  compass.value.textContent = `${heading.toFixed(1)}°`;
+  compass.point.textContent = compassPoint(heading);
 
   // 选择最短旋转方向，避免 359° -> 0° 时反向转一整圈
-  const current = ((state.compassAngle % 360) + 360) % 360;
-  state.compassAngle += ((heading - current + 540) % 360) - 180;
-  dom.compassNeedle.style.transform = `rotate(${state.compassAngle}deg)`;
+  const current = ((win.angle % 360) + 360) % 360;
+  win.angle += ((heading - current + 540) % 360) - 180;
+  compass.needle.style.transform = `rotate(${win.angle}deg)`;
 }
 
-function renderGauges() {
-  const dataset = focusDataset();
-  if (!dataset) return;
+/** 把某条轨迹的仪表盘（速度表 + 指南针 + 读数）画进它自己的浮窗。 */
+function renderDashWindow(win) {
+  const dataset = win && win.dataset;
+  const element = win && win.plotEl;
+  if (!dataset || !element) return;
 
   // 越界时不能拿端点历元当“当前值”，表盘置为无数据态
   const status = datasetState(dataset);
@@ -1767,6 +1838,7 @@ function renderGauges() {
 
   const speed = epoch && epoch.speedKmh !== null ? epoch.speedKmh : 0;
   const maxSpeed = Math.max(10, Math.ceil((dataset.summary.maxSpeedKmh || 0) / 5) * 5);
+  const accent = dataset.color || '#2563eb';
 
   const speedFigure = {
     data: [{
@@ -1776,7 +1848,7 @@ function renderGauges() {
       number: { valueformat: '.2f', font: { size: 22, color: inRange ? '#0f172a' : '#94a3b8' } },
       gauge: {
         axis: { range: [0, maxSpeed], showticklabels: false, ticks: '' },
-        bar: { color: inRange ? '#2563eb' : '#cbd5e1', thickness: 0.5 },
+        bar: { color: inRange ? accent : '#cbd5e1', thickness: 0.5 },
         bgcolor: '#f1f5f9',
         borderwidth: 0,
         steps: [{ range: [0, maxSpeed], color: '#e2e8f0' }],
@@ -1785,40 +1857,40 @@ function renderGauges() {
     layout: { margin: { l: 24, r: 24, t: 10, b: 8 }, paper_bgcolor: 'rgba(0,0,0,0)' },
   };
 
-  if (!inRange) {
-    dom.courseTitle.textContent = status === 'before' ? '航向 · 早于数据起点' : '航向 · 晚于数据末尾';
-  } else {
-    dom.courseTitle.textContent = epoch.course === null
-      ? '航向 · 无数据'
-      : `航向 · ${compassPoint(epoch.course)}`;
+  if (win.courseEl) {
+    if (!inRange) {
+      win.courseEl.textContent = status === 'before' ? '航向 · 早于数据起点' : '航向 · 晚于数据末尾';
+    } else {
+      win.courseEl.textContent = epoch.course === null
+        ? '航向 · 无数据'
+        : `航向 · ${compassPoint(epoch.course)}`;
+    }
   }
 
-  Plotly.react('gauge-speed', speedFigure.data, speedFigure.layout, PLOT_CONFIG);
-  updateCompass(inRange ? epoch.course : null);
-  state.gaugeReady = true;
+  Plotly.react(element, speedFigure.data, speedFigure.layout, PLOT_CONFIG);
+  win.ready = true;
+  updateCompass(win, inRange ? epoch.course : null);
+  renderReadouts(win, status, epoch);
 }
 
-function renderReadouts() {
-  const dataset = focusDataset();
-  if (!dataset) {
-    dom.readouts.innerHTML = '';
-    return;
-  }
+function renderReadouts(win, status, epoch) {
+  const holder = win && win.readoutsEl;
+  if (!holder) return;
+  const dataset = win.dataset;
 
-  const status = datasetState(dataset);
-  const epoch = status === 'ok' ? currentEpoch(dataset) : null;
   if (!epoch) {
     // 越界：明确说明是哪一段没有数据，而不是默默停在端点帧的读数上
     const where = status === 'before' ? '早于该数据起点' : '晚于该数据末尾';
     const local = datasetLocalTime(dataset, state.now);
-    dom.readouts.innerHTML = `<div class="readout wide out-of-range">`
-      + `<span class="label">${dataset.name}</span>`
+    holder.innerHTML = `<div class="readout out-of-range">`
+      + `<span class="label">${escapeHtml(dataset.name)}</span>`
       + `<span class="value">当前时刻 ${fmt(local, 1)} s ${where}`
       + `（覆盖 ${datasetRangeText(dataset)}），无对应历元</span></div>`;
     return;
   }
 
-  const visible = [...epoch.satellites.values()].filter((s) => state.activeSystems.has(s.system)).length;
+  const systems = dataset.activeSystems || new Set();
+  const visible = [...epoch.satellites.values()].filter((s) => systems.has(s.system)).length;
   const ellipsoid = epoch.altitude === null
     ? null
     : epoch.altitude + (epoch.geoidSeparation || 0);
@@ -1828,7 +1900,7 @@ function renderReadouts() {
     : (epoch.fixQuality !== null ? (FIX_QUALITY[epoch.fixQuality] || `质量 ${epoch.fixQuality}`) : '—');
 
   const rows = [
-    ['UTC 时间', epoch.datetime ? epoch.datetime.replace('T', ' ') : '—'],
+    ['UTC 时间', epoch.datetime ? epoch.datetime.replace('T', ' ') : '—', 'utc'],
     ['纬度', fmt(epoch.lat, 9)],
     ['经度', fmt(epoch.lon, 9)],
     ['海拔高 (MSL)', epoch.altitude === null ? '—' : `${fmt(epoch.altitude, 2)} m`],
@@ -1837,12 +1909,12 @@ function renderReadouts() {
     ['卫星 解算/可见', `${epoch.numSatsUsed === null ? '—' : epoch.numSatsUsed} / ${epoch.numSatsView === null ? '—' : epoch.numSatsView}`
       + `（显示 ${visible}）`],
     ['HDOP / PDOP', `${fmt(epoch.hdop, 2)} / ${fmt(epoch.pdop, 2)}`],
-    ['定位 / 椭球高', `${fixLabel} · ${ellipsoid === null ? '—' : `${fmt(ellipsoid, 2)} m`}`],
+    ['定位 / 椭球高', `${fixLabel} · ${ellipsoid === null ? '—' : `${fmt(ellipsoid, 2)} m`}`, 'wide'],
   ];
 
-  dom.readouts.innerHTML = rows.map(([label, value]) => (
-    `<div class="readout"><span class="label">${label}</span>`
-    + `<span class="value" title="${String(value).replace(/"/g, '&quot;')}">${value}</span></div>`
+  holder.innerHTML = rows.map(([label, value, modifier]) => (
+    `<div class="readout${modifier ? ` ${modifier}` : ''}"><span class="label">${label}</span>`
+    + `<span class="value" title="${escapeHtml(value)}">${value}</span></div>`
   )).join('');
 }
 
@@ -2470,32 +2542,44 @@ function renderEpoch() {
   if (!state.datasets.length) return;
   syncDatasetIndices();
   updateTimeline();
-
-  const dataset = focusDataset();
-  const epoch = currentEpoch(dataset);
-  if (dataset) {
-    // 始终带上文件名：现在可以同时加载多份数据，顶部需要能看出当前是哪一份
-    const status = datasetState(dataset);
-    dom.epochLabel.classList.toggle('warn', status !== 'ok');
-    if (status === 'ok') {
-      dom.epochLabel.textContent = `${epoch ? (epoch.time || '--:--:--') : '--:--:--'} · `
-        + `${dataset.index + 1}/${dataset.epochs.length} · ${dataset.name}`;
-    } else {
-      const where = status === 'before' ? '早于起点' : '超出末尾';
-      dom.epochLabel.textContent = `--:--:-- · ${dataset.name} · ${where} ${datasetRangeText(dataset)}`;
-    }
-  } else {
-    dom.epochLabel.classList.remove('warn');
-    dom.epochLabel.textContent = '未加载数据';
-  }
-
+  updateEpochLabel();
   renderMap(false);
-  renderSky();
-  renderGauges();
-  renderReadouts();
-  updateFocusSelect();
+  renderAllWindows();
   updateDatasetLegendFocus();
   renderCompareCursor();
+}
+
+/** 顶部当前时刻标签：显示聚焦数据集（点击图例里的文件名可切换）。 */
+function updateEpochLabel() {
+  const dataset = focusDataset();
+  if (!dataset) {
+    dom.epochLabel.classList.remove('warn');
+    dom.epochLabel.textContent = '未加载数据';
+    return;
+  }
+
+  const epoch = currentEpoch(dataset);
+  // 始终带上文件名：现在可以同时加载多份数据，顶部需要能看出当前是哪一份
+  const status = datasetState(dataset);
+  dom.epochLabel.classList.toggle('warn', status !== 'ok');
+  if (status === 'ok') {
+    dom.epochLabel.textContent = `${epoch ? (epoch.time || '--:--:--') : '--:--:--'} · `
+      + `${dataset.index + 1}/${dataset.epochs.length} · ${dataset.name}`;
+  } else {
+    const where = status === 'before' ? '早于起点' : '超出末尾';
+    dom.epochLabel.textContent = `--:--:-- · ${dataset.name} · ${where} ${datasetRangeText(dataset)}`;
+  }
+}
+
+/** 把所有已打开的星空图 / 仪表盘刷到当前时刻。 */
+function renderAllWindows() {
+  for (const dataset of state.datasets) {
+    if (!dataset.windows) continue;
+    for (const kind of WINDOW_ORDER) {
+      const win = dataset.windows[kind];
+      if (win) renderWindow(win);
+    }
+  }
 }
 
 function requestRender() {
@@ -2509,8 +2593,13 @@ function requestRender() {
 
 function resizePlots() {
   if (state.mapReady) Plotly.Plots.resize('map');
-  if (state.skyReady) Plotly.Plots.resize('sky');
-  if (state.gaugeReady) Plotly.Plots.resize('gauge-speed');
+  for (const dataset of state.datasets) {
+    if (!dataset.windows) continue;
+    for (const kind of WINDOW_ORDER) {
+      const win = dataset.windows[kind];
+      if (win) resizeWindowPlots(win);
+    }
+  }
   if (state.compareReady) Plotly.Plots.resize('compare-plot');
 }
 
@@ -2611,10 +2700,16 @@ function seekTo(seconds, options = {}) {
 }
 
 /* ------------------------------------------------------------------ *
- * 系统过滤
+ * 星空图浮窗里的星座过滤 / 显示开关
  * ------------------------------------------------------------------ */
-function buildSystemChips(systems) {
-  dom.systemFilter.innerHTML = '';
+/** 每条轨迹的星空图有自己的一套过滤状态，互不影响。 */
+function buildWindowChips(win) {
+  const holder = win && win.chipsEl;
+  if (!holder) return;
+  const dataset = win.dataset;
+  holder.innerHTML = '';
+
+  const systems = (dataset.summary && dataset.summary.systems) || {};
   const names = Object.keys(systems).sort(
     (a, b) => (systems[b] - systems[a]) || a.localeCompare(b),
   );
@@ -2623,19 +2718,48 @@ function buildSystemChips(systems) {
     chip.type = 'button';
     chip.className = 'chip';
     chip.dataset.system = name;
+    chip.title = `显示 / 隐藏 ${name} 卫星`;
     chip.innerHTML = `<span class="swatch" style="background:${SYSTEM_COLORS[name] || '#94a3b8'}"></span>`
-      + `${name} <b>${systems[name]}</b>`;
+      + `${escapeHtml(name)} <b>${systems[name]}</b>`;
+    chip.classList.toggle('off', !dataset.activeSystems.has(name));
     chip.addEventListener('click', () => {
-      if (state.activeSystems.has(name)) {
-        state.activeSystems.delete(name);
-        chip.classList.add('off');
-      } else {
-        state.activeSystems.add(name);
-        chip.classList.remove('off');
-      }
-      renderSky();
+      if (dataset.activeSystems.has(name)) dataset.activeSystems.delete(name);
+      else dataset.activeSystems.add(name);
+      chip.classList.toggle('off', !dataset.activeSystems.has(name));
+      renderSkyWindow(win);
     });
-    dom.systemFilter.appendChild(chip);
+    holder.appendChild(chip);
+  }
+
+  const options = [
+    {
+      label: '标注',
+      title: '在星空图上显示卫星编号',
+      active: () => dataset.showLabels !== false,
+      toggle: () => { dataset.showLabels = dataset.showLabels === false; },
+    },
+    {
+      label: '遮挡分割',
+      title: '叠加 sky_split.py 生成的直射带与非直射判定（需要 web/sky_split.json）',
+      active: () => dataset.showSplit !== false,
+      toggle: () => { dataset.showSplit = dataset.showSplit === false; },
+    },
+  ];
+  for (const option of options) {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'chip win-option';
+    chip.textContent = option.label;
+    chip.title = option.title;
+    chip.classList.toggle('off', !option.active());
+    chip.classList.toggle('on', option.active());
+    chip.addEventListener('click', () => {
+      option.toggle();
+      chip.classList.toggle('off', !option.active());
+      chip.classList.toggle('on', option.active());
+      renderSkyWindow(win);
+    });
+    holder.appendChild(chip);
   }
 }
 
@@ -2673,28 +2797,6 @@ function updateControlState() {
   for (const button of dom.rateButtons) button.disabled = !enabled;
 }
 
-function buildFocusOptions() {
-  const select = dom.focusSelect;
-  if (!select) return;
-  select.innerHTML = '';
-  for (const dataset of state.datasets) {
-    const option = document.createElement('option');
-    option.value = dataset.id;
-    option.textContent = dataset.name;
-    select.appendChild(option);
-  }
-  // 只有一条数据时不需要切换器
-  select.hidden = state.datasets.length < 2;
-  select.disabled = state.datasets.length < 2;
-  updateFocusSelect();
-}
-
-function updateFocusSelect() {
-  const select = dom.focusSelect;
-  if (!select || select.hidden) return;
-  if (state.focusId && select.value !== state.focusId) select.value = state.focusId;
-}
-
 /** 只切换图例行的 focus 高亮，不重建整个图例（避免丢失滑块状态）。 */
 function updateDatasetLegendFocus() {
   if (!dom.legendDatasets) return;
@@ -2703,20 +2805,11 @@ function updateDatasetLegendFocus() {
   }
 }
 
-function refreshSystemChips() {
-  const dataset = focusDataset();
-  const systems = (dataset && dataset.summary.systems) || {};
-  state.activeSystems = new Set(Object.keys(systems));
-  buildSystemChips(systems);
-}
-
-/** 切换星空图 / 仪表盘展示的数据集。 */
+/** 切换顶部时刻标签 / 对比曲线参照的数据集（星空图与仪表盘各自绑定，不受影响）。 */
 function setFocus(id) {
   if (!state.datasets.some((dataset) => dataset.id === id)) return;
   state.focusId = id;
-  refreshSystemChips();
   buildDatasetLegend();
-  updateFocusSelect();
   // 必须走完整的 renderEpoch：切换后顶部标签 / 时间轴 / 地图当前位置都要跟着变，
   // 只重画局部会留下上一个数据集的历元信息。
   renderEpoch();
@@ -2738,6 +2831,7 @@ function addDataset(text, name) {
   const axis = buildTimeAxis(parsed.epochs);
   const ordinal = state.datasets.length;
   const style = datasetStyleFor(name, ordinal);
+  const summary = summarize(parsed.epochs);
   const dataset = {
     id: `ds-${++state.datasetSeq}`,
     name,
@@ -2745,12 +2839,17 @@ function addDataset(text, name) {
     visible: style.visible,
     epochs: parsed.epochs,
     stats: parsed.stats,
-    summary: summarize(parsed.epochs),
+    summary,
     times: axis.times,
     base: axis.base,
     index: 0,
     // 地图用：有经纬度的轨迹点（WGS84 + 相对秒），时间窗裁剪基于它
     track: buildDatasetTrack(parsed.epochs, axis.times),
+    // 每条轨迹各有一套星空图和仪表盘；过滤 / 显示状态也各自独立
+    windows: { sky: null, dash: null },
+    activeSystems: new Set(Object.keys(summary.systems)),
+    showLabels: DEFAULT_SHOW_LABELS,
+    showSplit: DEFAULT_SHOW_SPLIT,
   };
 
   const first = state.datasets.length === 0;
@@ -2762,14 +2861,14 @@ function addDataset(text, name) {
   state.mapReady = false;
   state.view = null;
   rebuildTimeline();
-  refreshSystemChips();
-  buildFocusOptions();
   buildDatasetLegend();
   buildCompareChips();
   updateMapInfo();
   updateControlState();
   renderMap(true);
   renderEpoch();
+  // 新数据默认把自己的星空图和仪表盘一并打开（可随时从图例或窗口 × 关闭）
+  for (const kind of WINDOW_ORDER) openDatasetWindow(dataset, kind);
   renderCompare();
 
   toast(`已加载 ${name}：${dataset.epochs.length} 个历元，解析 ${elapsed.toFixed(0)} ms`);
@@ -2783,7 +2882,10 @@ function addDataset(text, name) {
 function removeDataset(id) {
   const index = state.datasets.findIndex((dataset) => dataset.id === id);
   if (index < 0) return;
-  const [removed] = state.datasets.splice(index, 1);
+  const removed = state.datasets[index];
+  // 先关掉这条轨迹自己的浮窗；位置仍然保留，重新载入时会回到原处
+  for (const kind of WINDOW_ORDER) closeDatasetWindow(removed, kind, { remember: false });
+  state.datasets.splice(index, 1);
   state.compare.datasets.delete(id);
   if (state.focusId === id) {
     state.focusId = state.datasets.length ? state.datasets[0].id : null;
@@ -2800,10 +2902,7 @@ function removeDataset(id) {
     state.duration = 0;
     state.datasets = [];
     state.focusId = null;
-    state.activeSystems = new Set();
     state.view = null;
-    buildSystemChips({});
-    buildFocusOptions();
     buildDatasetLegend();
     updateMapInfo();
     updateControlState();
@@ -2816,15 +2915,11 @@ function removeDataset(id) {
     state.window = { start: 0, end: 0 };
     updateWindowBar();
     renderMap(true);
-    Plotly.purge('sky');
-    state.skyReady = false;
     renderCompare();
     return;
   }
 
   rebuildTimeline();
-  refreshSystemChips();
-  buildFocusOptions();
   buildDatasetLegend();
   updateMapInfo();
   renderMap(true);
@@ -2892,21 +2987,22 @@ async function loadSplitData() {
     const payload = await response.json();
     if (!payload || !Array.isArray(payload.epochs)) return;
     state.split = payload;
-    if (state.datasets.length) renderSky();
+    if (state.datasets.length) renderSkyWindows();
   } catch (error) {
     // 没有分割文件或格式不对时保持原样
   }
 }
 
 /* ------------------------------------------------------------------ *
- * 浮窗（星空图 / 仪表盘）
+ * 星空图 / 仪表盘浮窗（每条轨迹一套）
  * ------------------------------------------------------------------ */
-const FLOAT_MIN_WIDTH = 260;
-const FLOAT_MIN_HEIGHT = 190;
+const SKY_WINDOW_HINT = '圆点 = 有载噪比（红→黄→绿随 cn0 升高）；黑色三角 = 无载噪比；'
+  + '红圈 = 判为非直射（p < 0.5）；青色区域 = 直射带';
+const DASH_WINDOW_HINT = '速度表 / 航向指南针 / 当前历元读数';
 
-function loadFloatLayout() {
+function loadWindowLayout() {
   try {
-    const saved = JSON.parse(localStorage.getItem(FLOAT_KEY) || 'null');
+    const saved = JSON.parse(localStorage.getItem(WINDOW_LAYOUT_KEY) || 'null');
     if (saved && typeof saved === 'object') return saved;
   } catch (error) {
     // 设置损坏时忽略
@@ -2914,168 +3010,365 @@ function loadFloatLayout() {
   return {};
 }
 
-function saveFloatLayout() {
+function saveWindowLayout() {
   try {
-    localStorage.setItem(FLOAT_KEY, JSON.stringify(state.floats));
+    localStorage.setItem(WINDOW_LAYOUT_KEY, JSON.stringify(state.windowLayout));
   } catch (error) {
     // localStorage 不可用时忽略
   }
 }
 
-function floatPanel(key) {
-  return document.querySelector(`.panel[data-float-key="${key}"]`);
-}
-
 function bringToFront(element) {
+  if (!element) return;
   state.floatZ += 1;
   element.style.zIndex = String(state.floatZ);
 }
 
-function rememberFloat(key, panel, open) {
-  const rect = panel.getBoundingClientRect();
-  state.floats[key] = {
+/** 浮窗位置按「窗口类型 + 文件名」记住，同一个文件重新载入时回到原处。 */
+function windowLayoutKey(win) {
+  return `${win.kind}:${win.dataset.name}`;
+}
+
+function rememberWindowLayout(win) {
+  if (!win || !win.el || !win.el.isConnected) return;
+  const rect = win.el.getBoundingClientRect();
+  state.windowLayout[windowLayoutKey(win)] = {
     x: Math.round(rect.left),
     y: Math.round(rect.top),
     w: Math.round(rect.width),
     h: Math.round(rect.height),
-    open,
   };
-  saveFloatLayout();
+  saveWindowLayout();
 }
 
-function attachFloatDrag(panel, key) {
-  const head = panel.querySelector('.panel-head');
-  if (!head || head.__floatBound) return;
-  head.__floatBound = true;
+function openWindowCount() {
+  let count = 0;
+  for (const dataset of state.datasets) {
+    if (!dataset.windows) continue;
+    for (const kind of WINDOW_ORDER) {
+      if (dataset.windows[kind]) count += 1;
+    }
+  }
+  return count;
+}
 
+/** 播放控制条底部的位置：新浮窗默认从这里往下排，不盖住顶栏。 */
+function transportBottom() {
+  const transport = document.querySelector('.transport');
+  const bar = document.querySelector('.topbar');
+  const bottom = transport
+    ? transport.getBoundingClientRect().bottom
+    : (bar ? bar.getBoundingClientRect().bottom : 0);
+  return Math.round(bottom) + 10;
+}
+
+/**
+ * 新窗口的默认位置：
+ *  - 每条轨迹占一列（右对齐），星空图在上、仪表盘在下，互不遮挡；
+ *  - 超过两列后在原列上略微错开，避免把地图完全盖住。
+ */
+function defaultWindowSpot(dataset, kind) {
+  const meta = WINDOW_KINDS[kind];
+  const ordinal = Math.max(0, state.datasets.indexOf(dataset));
+  const column = ordinal % 2;
+  const overflowRow = Math.floor(ordinal / 2);
+  const top = transportBottom() + overflowRow * 26;
+  const gap = 8;
+  const columnWidth = Math.max(WINDOW_KINDS.sky.width, WINDOW_KINDS.dash.width) + 16;
+  const columnLeft = window.innerWidth - 16 - columnWidth * (column + 1) + 16;
+  const x = Math.max(8, columnLeft + (columnWidth - 16 - meta.width));
+  // 一整列（星空图 + 仪表盘）放得下就上下堆叠；屏幕太矮时改为左右并排
+  const stacked = top + WINDOW_KINDS.sky.height + gap + WINDOW_KINDS.dash.height
+    <= window.innerHeight - 8;
+  if (!stacked) {
+    const beside = Math.max(8, x - WINDOW_KINDS.dash.width - 12);
+    return { x: kind === 'dash' ? beside : x, y: top };
+  }
+  return { x, y: top + (kind === 'dash' ? WINDOW_KINDS.sky.height + gap : 0) };
+}
+
+function placeWindow(win) {
+  const meta = WINDOW_KINDS[win.kind];
+  const saved = state.windowLayout[windowLayoutKey(win)];
+  const top = transportBottom();
+  const maxWidth = Math.max(meta.minWidth, window.innerWidth - 8);
+  const maxHeight = Math.max(meta.minHeight, window.innerHeight - top - 8);
+  const width = Math.round(Math.max(
+    meta.minWidth,
+    Math.min(saved && saved.w ? saved.w : meta.width, maxWidth),
+  ));
+  const height = Math.round(Math.max(
+    meta.minHeight,
+    Math.min(saved && saved.h ? saved.h : meta.height, maxHeight),
+  ));
+  const spot = defaultWindowSpot(win.dataset, win.kind);
+  const x = saved && Number.isFinite(saved.x) ? saved.x : spot.x;
+  const y = saved && Number.isFinite(saved.y) ? saved.y : spot.y;
+  win.el.style.width = `${width}px`;
+  win.el.style.height = `${height}px`;
+  win.el.style.left = `${Math.max(4, Math.min(x, window.innerWidth - width - 4))}px`;
+  win.el.style.top = `${Math.max(4, Math.min(y, window.innerHeight - height - 4))}px`;
+}
+
+/** 建一个浮窗骨架：标题栏（轨迹色点 + 名称 + 关闭）× 内容 × 缩放手柄。 */
+function buildWindow(dataset, kind) {
+  const meta = WINDOW_KINDS[kind];
+  const el = document.createElement('section');
+  el.className = `panel float-window ${kind}-window`;
+  el.dataset.kind = kind;
+  el.dataset.datasetId = dataset.id;
+
+  const name = escapeHtml(dataset.name);
+  const hint = kind === 'sky' ? SKY_WINDOW_HINT : DASH_WINDOW_HINT;
+  el.innerHTML = `
+    <div class="panel-head">
+      <span class="win-dot" style="background:${dataset.color}"></span>
+      <h2 class="win-title" title="${name} · ${escapeHtml(hint)}">${meta.title} · <span class="win-name">${name}</span></h2>
+      <div class="head-tools">
+        <button class="win-close" type="button" title="关闭${meta.title}（之后可从图例重新打开）">×</button>
+      </div>
+    </div>
+    ${kind === 'sky' ? `
+      <div class="chips-bar"><div class="chips win-chips"></div></div>
+      <div class="plot win-plot" data-role="plot"></div>
+    ` : `
+      <div class="dash-grid">
+        <div class="gauge-cell">
+          <div class="gauge-title">速度 · km/h</div>
+          <div class="gauge win-speed" data-role="plot"></div>
+        </div>
+        <div class="gauge-cell">
+          <div class="gauge-title" data-role="course">航向</div>
+          <div class="gauge compass-gauge" data-role="compass"></div>
+        </div>
+        <div class="readouts win-readouts" data-role="readouts"></div>
+      </div>
+    `}
+    <div class="float-resize" title="拖动调整大小"></div>
+  `;
+
+  const win = {
+    kind,
+    dataset,
+    el,
+    plots: [],
+    ready: false,
+    chipsEl: el.querySelector('.win-chips'),
+    plotEl: el.querySelector('[data-role="plot"]'),
+    courseEl: el.querySelector('[data-role="course"]'),
+    compassEl: el.querySelector('[data-role="compass"]'),
+    readoutsEl: el.querySelector('[data-role="readouts"]'),
+    compass: null,
+    angle: 0,
+  };
+  if (win.plotEl) win.plots.push(win.plotEl);
+
+  el.querySelector('.win-close').addEventListener('click', (event) => {
+    event.stopPropagation();
+    closeDatasetWindow(dataset, kind);
+  });
+
+  if (kind === 'sky') {
+    buildWindowChips(win);
+  } else {
+    buildCompass(win);
+  }
+  return win;
+}
+
+function observePlot(element) {
+  if (state.resizeObserver && element) {
+    try { state.resizeObserver.observe(element); } catch (error) { /* 忽略 */ }
+  }
+}
+
+function unobservePlot(element) {
+  if (state.resizeObserver && element) {
+    try { state.resizeObserver.unobserve(element); } catch (error) { /* 忽略 */ }
+  }
+}
+
+/** 为某条轨迹打开一个浮窗（已经打开时只把它提到最前）。 */
+function openDatasetWindow(dataset, kind) {
+  if (!dataset || !WINDOW_KINDS[kind]) return null;
+  if (!dataset.windows) dataset.windows = { sky: null, dash: null };
+  if (dataset.windows[kind]) {
+    bringToFront(dataset.windows[kind].el);
+    return dataset.windows[kind];
+  }
+
+  const win = buildWindow(dataset, kind);
+  placeWindow(win);
+  dataset.windows[kind] = win;
+  document.body.appendChild(win.el);
+
+  attachDatasetWindowDrag(win);
+  attachDatasetWindowResize(win);
+  bringToFront(win.el);
+  renderWindow(win);
+  observePlot(win.plotEl);
+  updateWindowToggles();
+
+  // 布局稳定后再量一次尺寸，避免 Plotly 按 append 前的容器宽度绘制
+  requestAnimationFrame(() => {
+    resizeWindowPlots(win);
+    requestAnimationFrame(() => resizeWindowPlots(win));
+  });
+  return win;
+}
+
+/** 关闭浮窗并释放 Plotly 实例；remember=false 时不覆盖已保存的位置。 */
+function closeDatasetWindow(dataset, kind, options = {}) {
+  const { remember = true } = options;
+  const win = dataset && dataset.windows && dataset.windows[kind];
+  if (!win) return;
+  if (remember) rememberWindowLayout(win);
+
+  win.el.remove();
+  dataset.windows[kind] = null;
+  updateWindowToggles();
+
+  // Plotly.react 的收尾是异步链：立刻 purge 会让仍在跑的链读到已清空的 _fullLayout
+  // 而报 "_redrawFromAutoMarginCount" 错误。先把 DOM 摘掉，等这一轮结束再释放实例。
+  const plots = win.plots;
+  win.plots = [];
+  setTimeout(() => {
+    for (const plot of plots) {
+      unobservePlot(plot);
+      try { Plotly.purge(plot); } catch (error) { /* 元素已移除时忽略 */ }
+    }
+  }, 0);
+}
+
+function toggleDatasetWindow(dataset, kind) {
+  if (!dataset || !WINDOW_KINDS[kind]) return;
+  if (dataset.windows && dataset.windows[kind]) closeDatasetWindow(dataset, kind);
+  else openDatasetWindow(dataset, kind);
+}
+
+/** 批量打开 / 关闭全部轨迹的全部浮窗。 */
+function setAllWindows(open) {
+  if (!state.datasets.length) return;
+  for (const dataset of state.datasets) {
+    for (const kind of WINDOW_ORDER) {
+      if (open) openDatasetWindow(dataset, kind);
+      else closeDatasetWindow(dataset, kind);
+    }
+  }
+}
+
+function renderWindow(win) {
+  if (!win || !win.el || !win.el.isConnected) return;
+  if (win.kind === 'sky') renderSkyWindow(win);
+  else renderDashWindow(win);
+}
+
+function resizeWindowPlots(win) {
+  if (!win) return;
+  for (const plot of win.plots) {
+    try {
+      Plotly.Plots.resize(plot);
+    } catch (error) {
+      // 窗口已关闭或 Plotly 还没画过时忽略
+    }
+  }
+}
+
+/** 图例行里的「星空图 / 仪表盘」按钮状态 + 图例头部的批量开关。 */
+function updateWindowToggles() {
+  if (dom.legendDatasets) {
+    for (const row of dom.legendDatasets.querySelectorAll('.dataset-row')) {
+      const dataset = state.datasets.find((item) => item.id === row.dataset.id);
+      if (!dataset) continue;
+      for (const kind of WINDOW_ORDER) {
+        const button = row.querySelector(`.win-toggle[data-kind="${kind}"]`);
+        if (!button) continue;
+        const open = Boolean(dataset.windows && dataset.windows[kind]);
+        button.classList.toggle('on', open);
+        button.setAttribute('aria-pressed', String(open));
+        button.title = `${open ? '关闭' : '打开'} ${dataset.name} 的${WINDOW_KINDS[kind].title}`;
+      }
+    }
+  }
+  updateLegendWindowsButton();
+}
+
+function updateLegendWindowsButton() {
+  const button = dom.legendWindows;
+  if (!button) return;
+  const total = state.datasets.length * WINDOW_ORDER.length;
+  const open = openWindowCount();
+  button.disabled = !state.datasets.length;
+  button.textContent = open > 0 ? '收起窗口' : '展开窗口';
+  button.title = state.datasets.length
+    ? `${open > 0 ? '关闭全部' : '打开全部'}星空图与仪表盘（共 ${total} 个）`
+    : '加载数据后可打开星空图与仪表盘';
+}
+
+/** 拖动标题栏移动浮窗；松开时记住位置。 */
+function attachDatasetWindowDrag(win) {
+  const head = win.el.querySelector('.panel-head');
+  if (!head) return;
   head.addEventListener('pointerdown', (event) => {
-    if (!panel.classList.contains('floating')) return;
     if (event.target.closest('button, input, select, label')) return;
     event.preventDefault();
-    const rect = panel.getBoundingClientRect();
+    const rect = win.el.getBoundingClientRect();
     const offsetX = event.clientX - rect.left;
     const offsetY = event.clientY - rect.top;
 
     const onMove = (moveEvent) => {
-      // 夹在视口内，避免把面板拖出屏幕后看不到、也拖不回来
+      // 夹在视口内，避免把窗口拖出屏幕后看不到、也拖不回来
       const maxX = Math.max(0, window.innerWidth - rect.width);
       const maxY = Math.max(0, window.innerHeight - rect.height);
-      const x = Math.min(maxX, Math.max(0, moveEvent.clientX - offsetX));
-      const y = Math.min(maxY, Math.max(0, moveEvent.clientY - offsetY));
-      panel.style.left = `${x}px`;
-      panel.style.top = `${y}px`;
+      win.el.style.left = `${Math.min(maxX, Math.max(0, moveEvent.clientX - offsetX))}px`;
+      win.el.style.top = `${Math.min(maxY, Math.max(0, moveEvent.clientY - offsetY))}px`;
     };
     const onUp = () => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
-      rememberFloat(key, panel, true);
+      rememberWindowLayout(win);
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
-    bringToFront(panel);
+    bringToFront(win.el);
   });
 }
 
-function attachFloatResize(panel, key) {
-  let handle = panel.querySelector('.float-resize');
-  if (!handle) {
-    handle = document.createElement('div');
-    handle.className = 'float-resize';
-    handle.title = '拖动调整大小';
-    panel.appendChild(handle);
-  }
-  if (handle.__resizeBound) return;
-  handle.__resizeBound = true;
-
+/** 拖右下角缩放浮窗；松开时记住尺寸并让 Plotly 重新量一次。 */
+function attachDatasetWindowResize(win) {
+  const handle = win.el.querySelector('.float-resize');
+  if (!handle) return;
   handle.addEventListener('pointerdown', (event) => {
     event.preventDefault();
     event.stopPropagation();
-    const rect = panel.getBoundingClientRect();
+    const meta = WINDOW_KINDS[win.kind];
+    const rect = win.el.getBoundingClientRect();
     const startX = event.clientX;
     const startY = event.clientY;
     const startWidth = rect.width;
     const startHeight = rect.height;
 
     const onMove = (moveEvent) => {
-      const width = Math.max(FLOAT_MIN_WIDTH, Math.min(
+      const width = Math.max(meta.minWidth, Math.min(
         window.innerWidth - rect.left - 4,
         startWidth + moveEvent.clientX - startX,
       ));
-      const height = Math.max(FLOAT_MIN_HEIGHT, Math.min(
+      const height = Math.max(meta.minHeight, Math.min(
         window.innerHeight - rect.top - 4,
         startHeight + moveEvent.clientY - startY,
       ));
-      panel.style.width = `${width}px`;
-      panel.style.height = `${height}px`;
+      win.el.style.width = `${width}px`;
+      win.el.style.height = `${height}px`;
     };
     const onUp = () => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
-      rememberFloat(key, panel, true);
-      resizePlots();
+      rememberWindowLayout(win);
+      resizeWindowPlots(win);
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
-  });
-}
-
-/** 把面板浮起来（floating=true）或放回侧栏（floating=false）。 */
-function setFloating(key, floating) {
-  const panel = floatPanel(key);
-  if (!panel) return;
-  const isFloating = panel.classList.contains('floating');
-
-  if (floating && !isFloating) {
-    const rect = panel.getBoundingClientRect();
-    const slot = document.createElement('div');
-    slot.className = 'float-slot';
-    slot.dataset.floatSlot = key;
-    slot.style.height = `${Math.round(rect.height)}px`;
-    slot.textContent = `浮窗中 · ${key === 'sky' ? '星空图' : '仪表盘'}`;
-    panel.parentNode.insertBefore(slot, panel);
-
-    const saved = state.floats[key] || {};
-    const width = Math.max(FLOAT_MIN_WIDTH, Math.min(saved.w || Math.round(rect.width), window.innerWidth - 16));
-    const height = Math.max(FLOAT_MIN_HEIGHT, Math.min(saved.h || Math.round(rect.height), window.innerHeight - 16));
-    // 没有历史位置时：星空图默认右上，仪表盘默认右下，互不遮挡
-    const defaultX = window.innerWidth - width - 24;
-    const defaultY = key === 'dash' ? Math.max(66, window.innerHeight - height - 16) : 66;
-    const x = Math.max(4, Math.min(saved.x === undefined ? defaultX : saved.x, window.innerWidth - width - 4));
-    const y = Math.max(4, Math.min(saved.y === undefined ? defaultY : saved.y, window.innerHeight - height - 4));
-
-    panel.classList.add('floating');
-    panel.style.width = `${width}px`;
-    panel.style.height = `${height}px`;
-    panel.style.left = `${x}px`;
-    panel.style.top = `${y}px`;
-    document.body.appendChild(panel);
-
-    attachFloatDrag(panel, key);
-    attachFloatResize(panel, key);
-    bringToFront(panel);
-    rememberFloat(key, panel, true);
-  } else if (!floating && isFloating) {
-    const slot = document.querySelector(`.float-slot[data-float-slot="${key}"]`);
-    panel.classList.remove('floating');
-    panel.removeAttribute('style');
-    if (slot) {
-      slot.parentNode.insertBefore(panel, slot);
-      slot.remove();
-    } else {
-      document.querySelector('.side').appendChild(panel);
-    }
-    rememberFloat(key, panel, false);
-  }
-
-  const button = document.querySelector(`.float-btn[data-float-key="${key}"]`);
-  if (button) {
-    button.classList.toggle('active', panel.classList.contains('floating'));
-    button.title = panel.classList.contains('floating') ? '还原到侧栏' : '浮窗显示';
-  }
-  // 布局稳定后再重算一次 Plotly 尺寸，否则图表会按旧容器宽度绘制
-  requestAnimationFrame(() => {
-    resizePlots();
-    requestAnimationFrame(resizePlots);
+    bringToFront(win.el);
   });
 }
 
@@ -3377,6 +3670,8 @@ function setCompareOpen(open) {
     placeCompareWindow();
     buildCompareChips();
     renderCompare();
+    // 浮窗（星空图 / 仪表盘）默认是 41+，对比曲线打开时要压在最上面
+    if (dom.compareWindow) bringToFront(dom.compareWindow);
   }
 }
 
@@ -3483,16 +3778,9 @@ function cacheDom() {
   dom.legendDivider = document.getElementById('legend-divider');
   dom.legendToggle = document.getElementById('legend-toggle');
   dom.legendReset = document.getElementById('legend-reset');
-  dom.systemFilter = document.getElementById('system-filter');
-  dom.readouts = document.getElementById('readouts');
-  dom.courseTitle = document.getElementById('course-title');
-  dom.gaugeCourse = document.getElementById('gauge-course');
+  dom.legendWindows = document.getElementById('legend-windows');
   dom.fileInput = document.getElementById('file-input');
   dom.mapStyle = document.getElementById('map-style');
-  dom.showLabels = document.getElementById('show-labels');
-  dom.showSplit = document.getElementById('show-split');
-  dom.skyNote = document.querySelector('.sky-note');
-  dom.focusSelect = document.getElementById('focus-dataset');
   dom.btnCompare = document.getElementById('btn-compare');
   dom.compareWindow = document.getElementById('compare-window');
   dom.compareMetrics = document.getElementById('compare-metrics');
@@ -3501,8 +3789,6 @@ function cacheDom() {
   dom.compareReset = document.getElementById('compare-reset');
   dom.compareClose = document.getElementById('compare-close');
   dom.comparePlot = document.getElementById('compare-plot');
-  dom.floatButtons = Array.from(document.querySelectorAll('.float-btn'));
-  dom.floatWindows = Array.from(document.querySelectorAll('.panel[data-float-key]'));
 }
 
 function bindEvents() {
@@ -3535,43 +3821,18 @@ function bindEvents() {
   });
   dom.legendReset.addEventListener('click', resetLayerStyle);
 
+  // 一次打开 / 收起全部轨迹的星空图与仪表盘
+  if (dom.legendWindows) {
+    dom.legendWindows.addEventListener('click', () => {
+      setAllWindows(openWindowCount() === 0);
+    });
+  }
+
   for (const button of dom.rateButtons) {
     button.addEventListener('click', () => {
       if (button.disabled) return;
       setRate(Number(button.dataset.rate) || 1);
     });
-  }
-
-  dom.showLabels.addEventListener('change', () => {
-    state.showLabels = dom.showLabels.checked;
-    renderSky();
-  });
-
-  if (dom.showSplit) {
-    dom.showSplit.addEventListener('change', () => {
-      state.showSplit = dom.showSplit.checked;
-      if (dom.skyNote) dom.skyNote.classList.toggle('off', !state.showSplit);
-      renderSky();
-    });
-  }
-
-  if (dom.focusSelect) {
-    dom.focusSelect.addEventListener('change', () => setFocus(dom.focusSelect.value));
-  }
-
-  // 浮窗开关（星空图 / 仪表盘）
-  for (const button of dom.floatButtons) {
-    button.addEventListener('click', () => {
-      const key = button.dataset.floatKey;
-      const panel = floatPanel(key);
-      if (!panel) return;
-      setFloating(key, !panel.classList.contains('floating'));
-    });
-  }
-  for (const panel of dom.floatWindows) {
-    const key = panel.dataset.floatKey;
-    attachFloatDrag(panel, key);
-    attachFloatResize(panel, key);
   }
 
   // 对比曲线浮窗
@@ -3626,26 +3887,28 @@ function bindEvents() {
   });
 
   window.addEventListener('resize', () => resizePlots());
-
-  if (typeof ResizeObserver !== 'undefined') {
-    let scheduled = false;
-    const observer = new ResizeObserver(() => {
-      if (scheduled) return;
-      scheduled = true;
-      requestAnimationFrame(() => {
-        scheduled = false;
-        resizePlots();
-      });
-    });
-    ['map', 'sky', 'gauge-speed', 'compare-plot'].forEach((id) => {
-      const element = document.getElementById(id);
-      if (element) observer.observe(element);
-    });
-  }
+  setupResizeObserver();
 
   window.addEventListener('error', (event) => {
     if (event.message) toast(`页面脚本错误：${event.message}`, true);
   });
+}
+
+/** 监听容器尺寸变化：地图 / 对比曲线固定，浮窗在打开时单独登记。 */
+function setupResizeObserver() {
+  if (typeof ResizeObserver === 'undefined') return;
+  state.resizeObserver = new ResizeObserver(() => {
+    if (state.resizeFrame !== null) return;
+    state.resizeFrame = requestAnimationFrame(() => {
+      state.resizeFrame = null;
+      resizePlots();
+    });
+  });
+  for (const id of ['map', 'compare-plot']) {
+    const element = document.getElementById(id);
+    if (!element) continue;
+    try { state.resizeObserver.observe(element); } catch (error) { /* 忽略 */ }
+  }
 }
 
 function init() {
@@ -3655,15 +3918,14 @@ function init() {
   // 图例样式在首次渲染地图前恢复，保证初始 trace 就用用户的配色
   state.datasetStyle = loadDatasetStyle();
   state.layerStyle = loadLayerStyle();
-  state.floats = loadFloatLayout();
+  state.windowLayout = loadWindowLayout();
   loadCompareConfig();
 
   buildMapLegend();
-  buildCompass();
-  buildFocusOptions();
   buildCompareChips();
   updateControlState();
   updateWindowBar();
+  updateLegendWindowsButton();
 
   // 支持 ?base=gaode-street 这类链接直接指定底图
   const params = new URLSearchParams(location.search);
@@ -3671,11 +3933,6 @@ function init() {
   if (requested && TILE_SOURCES[requested]) {
     state.mapSource = requested;
     dom.mapStyle.value = requested;
-  }
-
-  // 恢复上次的浮窗状态（位置和大小已经读入 state.floats）
-  for (const key of Object.keys(state.floats)) {
-    if (state.floats[key] && state.floats[key].open) setFloating(key, true);
   }
 
   if (location.protocol === 'file:') {

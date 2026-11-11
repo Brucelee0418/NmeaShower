@@ -88,6 +88,8 @@
         <div class="legend-head">
           <span class="legend-title">图例 · 样式</span>
           <div class="legend-actions">
+            <button id="legend-windows" class="legend-reset" type="button" disabled
+                    title="加载数据后可打开星空图与仪表盘">展开窗口</button>
             <button id="legend-reset" class="legend-reset" type="button" title="恢复默认颜色和大小">重置</button>
             <button id="legend-toggle" class="legend-toggle" type="button" aria-expanded="true" title="收起图例">−</button>
           </div>
@@ -98,56 +100,6 @@
       </div>
       <div id="map-info" class="map-info"></div>
     </section>
-
-    <aside class="side">
-      <section class="panel sky-panel" data-float-key="sky">
-        <div class="panel-head">
-          <h2>星空图（卫星分布）</h2>
-          <div class="head-tools">
-            <select id="focus-dataset" class="mini-select" title="选择星空图 / 仪表盘显示的数据集"></select>
-            <label class="toggle" title="叠加 sky_split.py 生成的遮挡分割">
-              <input id="show-split" type="checkbox" checked />
-              <span>遮挡分割</span>
-            </label>
-            <button class="float-btn" type="button" data-float-key="sky" title="浮窗显示 / 还原">⧉</button>
-          </div>
-        </div>
-        <div class="chips-bar">
-          <div id="system-filter" class="chips"></div>
-        </div>
-        <div class="sky-note">
-          <span><i class="dot-marker"></i>圆点 = 有载噪比（红→黄→绿随 cn0 升高）</span>
-          <span><i class="tri-marker"></i>黑色三角 = 无载噪比（cn0 为 0）</span>
-          <span class="split-note"><i class="ring-marker"></i>红圈 = 有载噪比但判为非直射（p &lt; 0.5）</span>
-          <span class="split-note"><i class="band-marker"></i>青色区域 = 直射带（两条边界曲线之间）</span>
-        </div>
-        <div id="sky" class="plot"></div>
-      </section>
-
-      <section class="panel dash-panel" data-float-key="dash">
-        <div class="panel-head">
-          <h2>仪表盘</h2>
-          <div class="head-tools">
-            <label class="toggle">
-              <input id="show-labels" type="checkbox" checked />
-              <span>星空图标注</span>
-            </label>
-            <button class="float-btn" type="button" data-float-key="dash" title="浮窗显示 / 还原">⧉</button>
-          </div>
-        </div>
-        <div class="dash-grid">
-          <div class="gauge-cell">
-            <div class="gauge-title">速度 · km/h</div>
-            <div id="gauge-speed" class="gauge"></div>
-          </div>
-          <div class="gauge-cell">
-            <div class="gauge-title" id="course-title">航向</div>
-            <div id="gauge-course" class="gauge compass-gauge"></div>
-          </div>
-          <div id="readouts" class="readouts"></div>
-        </div>
-      </section>
-    </aside>
   </main>
 
   <section id="compare-window" class="compare-window" hidden>

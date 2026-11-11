@@ -350,10 +350,11 @@ body {
 .preset:disabled { opacity: 0.4; cursor: not-allowed; }
 
 /* ---------------- 主布局 ---------------- */
+/* 地图占满整宽：星空图 / 仪表盘改为每条轨迹一套的浮窗，不再占用侧栏 */
 main {
   flex: 1;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 440px;
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
   padding: 8px;
   min-height: 0;
@@ -551,13 +552,6 @@ main {
 .legend-row.off .legend-preview,
 .legend-row.off .legend-range { opacity: 0.38; }
 
-.side {
-  display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
-  gap: 8px;
-  min-height: 0;
-}
-
 .panel-head {
   display: flex;
   align-items: center;
@@ -621,39 +615,7 @@ main {
 .chip.off { opacity: 0.38; background: #fff; }
 .chip:hover { background: #eef2f7; }
 
-.sky-note {
-  display: flex;
-  gap: 14px;
-  flex-wrap: wrap;
-  padding: 0 12px 4px;
-  font-size: 10.5px;
-  color: var(--muted);
-}
-
-.sky-note span {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-}
-
-.dot-marker {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, #b91c1c, #f59e0b 50%, #15803d);
-  display: inline-block;
-}
-
-.tri-marker {
-  width: 0;
-  height: 0;
-  border-left: 5px solid transparent;
-  border-right: 5px solid transparent;
-  border-bottom: 8px solid #000;
-  display: inline-block;
-}
-
-/* 遮挡分割叠加图例 */
+/* 浮窗头部工具区 */
 .head-tools {
   display: flex;
   align-items: center;
@@ -662,32 +624,14 @@ main {
   justify-content: flex-end;
 }
 
-.ring-marker {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  border: 2px solid #dc2626;
-  display: inline-block;
-}
-
-.band-marker {
-  width: 9px;
-  height: 9px;
-  display: inline-block;
-  background: rgba(13, 148, 136, 0.18);
-  border-left: 2px solid #0f766e;
-  border-right: 2px solid #0f766e;
-}
-
-.sky-note .split-note { color: #0f766e; }
-.sky-note.off .split-note { display: none; }
-
 /* 数据集图例 */
 .legend-datasets {
   display: flex;
   flex-direction: column;
   gap: 1px;
   padding: 3px 7px 4px;
+  max-height: 44vh;
+  overflow-y: auto;
 }
 
 .legend-datasets:empty { display: none; }
@@ -695,10 +639,30 @@ main {
 .dataset-row {
   display: grid;
   grid-template-columns: 14px 17px minmax(0, 1fr) auto 18px;
+  grid-template-areas:
+    "eye color name count remove"
+    "eye color tools tools tools";
   align-items: center;
-  gap: 5px;
+  column-gap: 5px;
+  row-gap: 1px;
   padding: 3px 1px;
   border-radius: 4px;
+}
+
+.legend-datasets .dataset-row + .dataset-row { border-top: 1px solid #f1f5f9; }
+
+.dataset-eye { grid-area: eye; }
+.dataset-color { grid-area: color; }
+.dataset-name { grid-area: name; }
+.dataset-count { grid-area: count; }
+.dataset-remove { grid-area: remove; }
+
+.dataset-tools {
+  grid-area: tools;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-bottom: 2px;
 }
 
 .dataset-row:hover { background: #f8fafc; }
@@ -772,6 +736,29 @@ main {
 
 .dataset-remove:hover { background: #fee2e2; color: #b91c1c; }
 
+/* 每条轨迹的星空图 / 仪表盘开关 */
+.win-toggle {
+  appearance: none;
+  border: 1px solid #dbe3ee;
+  background: #fff;
+  color: #64748b;
+  font: inherit;
+  font-size: 9.5px;
+  line-height: 1.45;
+  padding: 0 7px;
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.win-toggle:hover { background: #eef2f7; color: #0f172a; }
+.win-toggle.on {
+  background: #dbeafe;
+  border-color: #93c5fd;
+  color: #1d4ed8;
+  font-weight: 600;
+}
+
 .legend-divider {
   padding: 3px 9px 2px;
   border-top: 1px solid #eef2f7;
@@ -783,54 +770,83 @@ main {
 
 .legend-divider:empty { display: none; }
 
-/* 浮窗按钮 */
-.float-btn {
-  appearance: none;
-  border: 1px solid var(--border);
-  background: #f8fafc;
-  color: #475569;
-  width: 22px;
-  height: 20px;
-  line-height: 1;
-  border-radius: 5px;
-  font-size: 12px;
-  cursor: pointer;
-  padding: 0;
-}
-
-.float-btn:hover { background: #eef2f7; color: #0f172a; }
-
-.mini-select {
-  max-width: 132px;
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  background: #f8fafc;
-  color: #475569;
-  font-size: 10.5px;
-  padding: 2px 4px;
-  outline: none;
-}
-
-/* 浮窗态面板 */
-.panel.floating {
+/* ---------------- 星空图 / 仪表盘浮窗 ---------------- */
+/* 每条轨迹各有一套，可拖动标题栏移动、拖右下角缩放、点 × 关闭 */
+.float-window {
   position: fixed;
-  z-index: 40;
+  z-index: 41;
   display: flex;
-  box-shadow: 0 12px 36px rgba(15, 23, 42, 0.26), 0 2px 6px rgba(15, 23, 42, 0.16);
   border-color: #c3ccd9;
-  min-width: 260px;
-  min-height: 190px;
+  box-shadow: 0 12px 36px rgba(15, 23, 42, 0.26), 0 2px 6px rgba(15, 23, 42, 0.16);
 }
 
-.panel.floating .panel-head {
-  cursor: move;
-  user-select: none;
+.float-window .panel-head {
+  flex-wrap: nowrap;
+  gap: 6px;
+  padding: 4px 5px 4px 9px;
   background: #f8fafc;
   border-bottom: 1px solid #eef2f7;
   border-radius: 10px 10px 0 0;
+  cursor: move;
+  user-select: none;
 }
 
-.panel.floating .float-btn { border-color: #93c5fd; color: #1d4ed8; }
+.win-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.08);
+}
+
+.float-window .win-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #334155;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.win-name { font-weight: 400; color: #64748b; }
+
+.win-close {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: #94a3b8;
+  font: inherit;
+  font-size: 14px;
+  line-height: 16px;
+  width: 20px;
+  height: 18px;
+  padding: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.win-close:hover { background: #fee2e2; color: #b91c1c; }
+
+.float-window .chips-bar { padding: 3px 8px 4px; }
+.float-window .chips { justify-content: flex-start; gap: 3px; }
+.float-window .chip { font-size: 9.5px; padding: 1px 6px 1px 5px; }
+.float-window .chip.win-option { border-style: dashed; }
+.float-window .chip.win-option.on { border-style: solid; }
+
+.float-window .plot { flex: 1; min-height: 0; min-width: 0; }
+
+.float-window .dash-grid {
+  flex: 1;
+  min-height: 0;
+  grid-template-rows: minmax(96px, 1fr) auto;
+}
+
+.float-window .compass { max-height: 150px; }
+
+.float-window .readout { padding: 3px 7px; }
 
 .float-resize {
   position: absolute;
@@ -844,21 +860,6 @@ main {
     linear-gradient(135deg, transparent 52%, #94a3b8 52%, #94a3b8 62%, transparent 62%),
     linear-gradient(135deg, transparent 70%, #cbd5e1 70%, #cbd5e1 80%, transparent 80%);
 }
-
-.float-slot {
-  border: 1px dashed #cbd5e1;
-  border-radius: 10px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #94a3b8;
-  font-size: 11px;
-  background: rgba(255, 255, 255, 0.5);
-  min-height: 0;
-}
-
-.side .float-slot.sky-slot { min-height: 180px; }
-.side .float-slot.dash-slot { min-height: 120px; }
 
 /* 对比曲线浮窗 */
 .compare-window {
@@ -1078,6 +1079,10 @@ body.dragging::after {
 
 .readout.wide { grid-column: span 2; }
 
+/* 浮窗里的仪表盘：UTC 时间与越界说明各占一整行，避免被截断 */
+.readout.utc,
+.readout.out-of-range { grid-column: 1 / -1; }
+
 /* ---------------- 提示 ---------------- */
 .toast {
   position: fixed;
@@ -1096,17 +1101,12 @@ body.dragging::after {
 
 .toast.error { background: #b91c1c; }
 
-@media (max-width: 1080px) {
-  main { grid-template-columns: minmax(0, 1fr) 360px; }
-}
-
 @media (max-width: 820px) {
   html, body { overflow: auto; }
   main {
     grid-template-columns: 1fr;
-    grid-template-rows: minmax(320px, 46vh) auto;
+    grid-template-rows: minmax(320px, 1fr);
   }
-  .side { grid-template-rows: 380px 360px; }
   .compare-window { width: calc(100vw - 24px); right: 12px; }
 }
 
@@ -1118,22 +1118,11 @@ body.dragging::after {
   padding: 4px 2px;
 }
 
-.float-btn.active {
-  background: #dbeafe;
-  border-color: #93c5fd;
-  color: #1d4ed8;
-}
-
 #btn-compare[aria-pressed="true"] {
   background: #1d4ed8;
   border-color: #2563eb;
   color: #ffffff;
 }
-
-/* 浮窗内空间分配 */
-.panel.floating .sky-panel .plot,
-.panel.floating .plot { flex: 1; }
-.panel.floating .dash-grid { flex: 1; min-height: 0; }
 
 /* 跟随数据集配色的图层行少一列（无独立颜色控件） */
 .legend-row.follows-dataset {
@@ -1147,15 +1136,9 @@ body.dragging::after {
 .head-tools { min-width: 0; }
 .head-tools .chips { min-width: 0; max-width: 100%; }
 
-/* 浮窗里的仪表盘高度自适应，避免速度表被裁 */
-.panel.floating .dash-grid { grid-template-rows: minmax(110px, 1fr) auto; }
-
 /* 星座过滤 chips 独占一行，避免把标题行撑高 */
 .chips-bar { padding: 0 12px 5px; }
 .chips-bar .chips { justify-content: flex-start; }
-
-/* 数据集下拉按内容取宽，不被 flex 压缩成看不清 */
-.mini-select { flex: 0 0 auto; max-width: 150px; }
 
 /* 越界提示：读数区需要换行显示，不能用省略号截断 */
 .readout.out-of-range .label { color: #b45309; }

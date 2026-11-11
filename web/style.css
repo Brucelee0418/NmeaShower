@@ -1092,6 +1092,31 @@ body.dragging::after {
 .readout.utc,
 .readout.out-of-range { grid-column: 1 / -1; }
 
+/* ---------------- 地图拖动时间提示 ---------------- */
+.map-drag-label {
+  position: fixed;
+  z-index: 60;
+  pointer-events: none;
+  background: rgba(15, 23, 42, 0.92);
+  color: #f1f5f9;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: nowrap;
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.32);
+  font-variant-numeric: tabular-nums;
+}
+
+.map-drag-label[hidden] { display: none; }
+
+.map-drag-label b {
+  font-weight: 600;
+  color: #e2e8f0;
+  margin-right: 6px;
+}
+
 /* ---------------- 提示 ---------------- */
 .toast {
   position: fixed;

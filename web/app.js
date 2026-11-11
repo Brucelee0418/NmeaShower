@@ -669,6 +669,7 @@ const state = {
   window: { start: 0, end: 0 },
   windowFrame: null,
   timelineDrag: null,   // 轨道上的拖动状态：改标尺 / 平移窗口 / 定位当前时刻
+  mapDrag: null,        // 拖动地图上的「当前位置」点：{ dataset, clientX, clientY, frame, ... }
   windowLayout: {},     // 浮窗位置：{ 'sky:文件名': {x,y,w,h} }
   resizeObserver: null,
   resizeFrame: null,
@@ -1009,6 +1010,284 @@ function attachMapInteractions() {
       const release = () => { clamping = false; };
       Plotly.relayout(element, 'mapbox.zoom', clamped).then(release, release);
     }
+  });
+}
+
+/* ------------------------------------------------------------------ *
+ * 拖动地图上的「当前位置」点来调整时间
+ * ------------------------------------------------------------------ */
+const MAP_POINT_HIT_RADIUS = 16;   // 命中当前位置点的像素半径
+const MAP_POINT_APPLY_INTERVAL = 40; // 拖动时重绘的最小间隔（ms），避免 60fps 拖垮
+
+/** Plotly mapbox 子图里的 Mapbox GL 实例（用于像素 ↔ 经纬度换算）。 */
+function mapboxMap() {
+  const element = document.getElementById('map');
+  const mapbox = element && element._fullLayout && element._fullLayout.mapbox;
+  return (mapbox && mapbox._subplot && mapbox._subplot.map) || null;
+}
+
+/** 指针是否落在某条轨迹的「当前位置」点上；返回最近的一条。 */
+function currentMarkerAt(event) {
+  if (!state.mapReady || !state.datasets.length) return null;
+  if (!layerStyle('current').visible) return null;
+  const map = mapboxMap();
+  if (!map) return null;
+
+  const rect = map.getContainer().getBoundingClientRect();
+  const x = event.clientX - rect.left;
+  const y = event.clientY - rect.top;
+  let best = null;
+  for (const dataset of state.datasets) {
+    if (!dataset.visible || datasetState(dataset) !== 'ok') continue;
+    const epoch = dataset.epochs[dataset.index];
+    if (!epoch || epoch.lat === null || epoch.lon === null) continue;
+    const [lat, lon] = toDisplay(epoch.lat, epoch.lon);
+    const point = map.project([lon, lat]);
+    const distance = Math.hypot(point.x - x, point.y - y);
+    if (distance <= MAP_POINT_HIT_RADIUS && (!best || distance < best.distance)) {
+      best = { dataset, distance };
+    }
+  }
+  return best;
+}
+
+/** 指针下方最近的轨迹点下标（track 下标，含自己的相对时间）。 */
+function nearestTrackIndex(dataset, lng, lat) {
+  const display = displayTrack(dataset);
+  const cosLat = Math.cos((lat * Math.PI) / 180);
+  let best = -1;
+  let bestDistance = Infinity;
+  for (let i = 0; i < display.lat.length; i += 1) {
+    const dLat = display.lat[i] - lat;
+    const dLon = (display.lon[i] - lng) * cosLat;
+    const distance = dLat * dLat + dLon * dLon;
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = i;
+    }
+  }
+  return best;
+}
+
+/** UTC 时刻文案；没有 UTC 基准时退回相对秒。 */
+function mapClockText(absoluteSeconds, fallback) {
+  const baseline = utcBaseline();
+  if (baseline !== null && Number.isFinite(absoluteSeconds)) {
+    return `${formatUtc(absoluteSeconds, utcDateStyle(baseline))} UTC`;
+  }
+  return String(fallback || '—');
+}
+
+function mapPointLabelHtml(dataset, clockText, hint) {
+  return `<b>${escapeHtml(dataset.name)}</b>${clockText}${hint ? ` · ${hint}` : ''}`;
+}
+
+function showMapDragLabel(html, clientX, clientY) {
+  const label = dom.mapDragLabel;
+  if (!label) return;
+  if (label.__html !== html) {
+    label.innerHTML = html;
+    label.__html = html;
+  }
+  label.hidden = false;
+  positionMapDragLabel(clientX, clientY);
+}
+
+function positionMapDragLabel(clientX, clientY) {
+  const label = dom.mapDragLabel;
+  if (!label || label.hidden) return;
+  const width = label.offsetWidth || 150;
+  const height = label.offsetHeight || 22;
+  const x = Math.min(window.innerWidth - width - 8, Math.max(8, clientX + 14));
+  const y = Math.min(window.innerHeight - height - 8, Math.max(8, clientY - height - 12));
+  label.style.left = `${x}px`;
+  label.style.top = `${y}px`;
+}
+
+function hideMapDragLabel() {
+  if (dom.mapDragLabel) dom.mapDragLabel.hidden = true;
+}
+
+function setMapCursor(cursor) {
+  const map = mapboxMap();
+  if (!map) return;
+  const container = map.getContainer ? map.getContainer() : null;
+  if (container) container.style.cursor = cursor;
+  const canvas = map.getCanvas ? map.getCanvas() : null;
+  if (canvas) canvas.style.cursor = cursor;
+}
+
+/** 把指针位置换算成拖动数据里最近的时间点，并更新时间窗 / 当前时刻。 */
+function applyMapDrag() {
+  const drag = state.mapDrag;
+  if (!drag || !drag.moved) return;
+  const { dataset, map } = drag;
+  if (!state.datasets.includes(dataset)) return;
+  const container = map.getContainer ? map.getContainer() : null;
+  if (!container || !container.isConnected) return;
+
+  const rect = container.getBoundingClientRect();
+  const point = map.unproject([drag.clientX - rect.left, drag.clientY - rect.top]);
+  const index = nearestTrackIndex(dataset, point.lng, point.lat);
+  if (index < 0 || index === drag.lastIndex) return;
+  const time = dataset.track.time[index];
+  if (!Number.isFinite(time)) return;
+
+  const globalRelative = datasetOffset(dataset) + time;
+  // 拖到时间窗外的点时让窗口跟着平移，保证游标、轨迹切片与读数一致
+  if (globalRelative < state.window.start - 1e-6 || globalRelative > state.window.end + 1e-6) {
+    const width = state.window.end - state.window.start;
+    const start = Math.max(0, Math.min(state.duration - width, globalRelative - width / 2));
+    setWindow(start, start + width, { follow: false });
+  }
+  const clamped = Math.min(state.window.end, Math.max(state.window.start, globalRelative));
+  setGlobalTime(state.origin + clamped);
+  renderEpoch();
+
+  drag.lastIndex = index;
+  const absolute = state.origin + datasetOffset(dataset) + time;
+  showMapDragLabel(
+    mapPointLabelHtml(dataset, mapClockText(absolute, `${time.toFixed(1)} s`)),
+    drag.clientX,
+    drag.clientY,
+  );
+}
+
+function scheduleMapDragApply() {
+  const drag = state.mapDrag;
+  if (!drag || drag.frame !== null) return;
+  const wait = Math.max(0, MAP_POINT_APPLY_INTERVAL - (performance.now() - drag.lastApply));
+  drag.frame = setTimeout(() => {
+    drag.frame = null;
+    if (!state.mapDrag) return;
+    state.mapDrag.lastApply = performance.now();
+    applyMapDrag();
+  }, wait);
+}
+
+function beginMapPointDrag(event, hit) {
+  const map = mapboxMap();
+  if (!map) return;
+  event.preventDefault();
+  event.stopPropagation();
+  stopPlayback();
+
+  const epoch = hit.dataset.epochs[hit.dataset.index] || null;
+  const captureElement = event.currentTarget;
+  state.mapDrag = {
+    dataset: hit.dataset,
+    map,
+    panEnabled: Boolean(map.dragPan && map.dragPan.isEnabled()),
+    pointerId: event.pointerId,
+    captureElement,
+    startX: event.clientX,
+    startY: event.clientY,
+    clientX: event.clientX,
+    clientY: event.clientY,
+    moved: false,
+    lastIndex: -1,
+    lastApply: 0,
+    frame: null,
+  };
+  if (state.mapDrag.panEnabled) map.dragPan.disable();
+  setMapCursor('grabbing');
+  showMapDragLabel(
+    mapPointLabelHtml(hit.dataset, mapClockText(epoch ? epochStamp(epoch) : null, epoch ? epoch.time : '—')),
+    event.clientX,
+    event.clientY,
+  );
+
+  // 指针捕获：拖出浏览器窗口再松手时也能收到 pointerup，避免卡在拖动状态
+  if (captureElement && captureElement.setPointerCapture) {
+    try { captureElement.setPointerCapture(event.pointerId); } catch (error) { /* 忽略 */ }
+  }
+
+  window.addEventListener('pointermove', onMapPointDragMove);
+  window.addEventListener('pointerup', onMapPointDragEnd);
+  window.addEventListener('pointercancel', onMapPointDragEnd);
+  window.addEventListener('blur', onMapPointDragEnd);
+}
+
+function onMapPointDragMove(event) {
+  const drag = state.mapDrag;
+  if (!drag) return;
+  event.preventDefault();
+  drag.clientX = event.clientX;
+  drag.clientY = event.clientY;
+  positionMapDragLabel(event.clientX, event.clientY);
+  // 单击（几乎没动）不改时间，避免误触让时间跳到轨迹自交的另一个点
+  if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) > 3) {
+    drag.moved = true;
+  }
+  if (drag.moved) scheduleMapDragApply();
+}
+
+function onMapPointDragEnd(event) {
+  const drag = state.mapDrag;
+  if (!drag) return;
+  if (event && event.type === 'pointerup') {
+    drag.clientX = event.clientX;
+    drag.clientY = event.clientY;
+  }
+  if (drag.frame !== null) {
+    clearTimeout(drag.frame);
+    drag.frame = null;
+  }
+  // 松手位置可能还没被节流的那一帧处理到，补一次
+  applyMapDrag();
+  if (drag.panEnabled && drag.map.dragPan) drag.map.dragPan.enable();
+  if (drag.captureElement && drag.captureElement.releasePointerCapture
+      && drag.pointerId !== undefined) {
+    try { drag.captureElement.releasePointerCapture(drag.pointerId); } catch (error) { /* 忽略 */ }
+  }
+  state.mapDrag = null;
+  window.removeEventListener('pointermove', onMapPointDragMove);
+  window.removeEventListener('pointerup', onMapPointDragEnd);
+  window.removeEventListener('pointercancel', onMapPointDragEnd);
+  window.removeEventListener('blur', onMapPointDragEnd);
+  hideMapDragLabel();
+  setMapCursor('');
+}
+
+/** 地图上的当前位置点：按下拖动改时间；悬停显示该点的时间。只需绑定一次。 */
+function attachMapPointInteractions() {
+  const element = document.getElementById('map');
+  if (!element || element.__pointDragBound) return;
+  element.__pointDragBound = true;
+
+  // capture：先于 mapbox 的拖拽处理，命中当前位置点时不要平移地图
+  element.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0 || state.mapDrag) return;
+    const hit = currentMarkerAt(event);
+    if (!hit) return;
+    beginMapPointDrag(event, hit);
+  }, true);
+
+  element.addEventListener('pointermove', (event) => {
+    if (state.mapDrag || event.buttons !== 0) return;
+    const hit = currentMarkerAt(event);
+    if (!hit) {
+      hideMapDragLabel();
+      setMapCursor('');
+      return;
+    }
+    setMapCursor('grab');
+    const epoch = hit.dataset.epochs[hit.dataset.index] || null;
+    showMapDragLabel(
+      mapPointLabelHtml(
+        hit.dataset,
+        mapClockText(epoch ? epochStamp(epoch) : null, epoch ? epoch.time : '—'),
+        '拖动调整时间',
+      ),
+      event.clientX,
+      event.clientY,
+    );
+  });
+
+  element.addEventListener('pointerleave', () => {
+    if (state.mapDrag) return;
+    hideMapDragLabel();
+    setMapCursor('');
   });
 }
 
@@ -4162,6 +4441,7 @@ function cacheDom() {
   dom.timelinePresets = Array.from(document.querySelectorAll('.preset[data-minutes]'));
   dom.epochLabel = document.getElementById('epoch-label');
   dom.mapInfo = document.getElementById('map-info');
+  dom.mapDragLabel = document.getElementById('map-drag-label');
   dom.mapLegend = document.getElementById('map-legend');
   dom.legendRows = document.getElementById('legend-rows');
   dom.legendDatasets = document.getElementById('legend-datasets');
@@ -4186,6 +4466,7 @@ function cacheDom() {
 
 function bindEvents() {
   attachTimelineInteractions();
+  attachMapPointInteractions();
 
   dom.fileInput.addEventListener('change', () => {
     handleFiles(dom.fileInput.files);

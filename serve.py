@@ -380,6 +380,18 @@ class ThreadingServer(http.server.ThreadingHTTPServer):
     # 新进程会“假启动”并继续让旧进程响应请求，因此 Windows 上改用独占绑定。
     allow_reuse_address = os.name != "nt"
 
+    def handle_error(self, request, client_address) -> None:
+        """浏览器取消请求时的断连是正常现象，不打印 traceback。
+
+        地图瓦片是并发请求，拖动 / 缩放地图、刷新页面或关闭标签页时，
+        浏览器会直接掐断还没完成的连接，http.server 默认会为每次断连
+        打印一大段 ConnectionAbortedError / ConnectionResetError 栈。
+        """
+        error = sys.exc_info()[1]
+        if isinstance(error, (ConnectionError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
+
 
 def pick_port(host: str, preferred: int, attempts: int = 20) -> int:
     for offset in range(attempts):

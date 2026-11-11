@@ -155,6 +155,8 @@ const COMPARE_METRICS = {
   course: { name: '航向', unit: '°', digits: 1 },
   cn0: { name: '平均 cn0', unit: 'dB-Hz', digits: 1 },
   sats: { name: '卫星数', unit: '颗', digits: 0 },
+  // 水平误差依赖图例里选定的基准，没有基准时该指标不可用
+  error: { name: '水平误差', unit: 'm', digits: 2 },
 };
 const DEFAULT_COMPARE_METRICS = ['speed', 'sats'];
 // 对比曲线默认按绝对 UTC 对齐（同一天多次采集、需要看真实时间关系时更直观）
@@ -635,6 +637,8 @@ const state = {
   datasets: [],       // 多条数据的集合，顺序即图例顺序
   datasetSeq: 0,
   focusId: null,      // 顶部时刻标签 / 对比曲线「相对起点」参照的数据集
+  referenceId: null,  // 水平误差的基准数据集（图例里设置）
+  referenceName: '',  // 基准文件名，用于重新载入同名文件时恢复选择
   now: 0,             // 全局绝对时间（UTC 秒），所有视图的时间基准
   origin: 0,          // 轨道 0 点对应的绝对秒
   duration: 0,        // 全部数据集覆盖的时间跨度
@@ -1135,6 +1139,7 @@ function buildDatasetLegend() {
     row.dataset.id = dataset.id;
     row.classList.toggle('off', !dataset.visible);
     row.classList.toggle('focus', dataset.id === state.focusId);
+    row.classList.toggle('reference', dataset.id === state.referenceId);
     row.title = `${dataset.name} · ${dataset.epochs.length} 个历元`;
 
     const eye = document.createElement('label');
@@ -1183,6 +1188,20 @@ function buildDatasetLegend() {
       toggle.addEventListener('click', () => toggleDatasetWindow(dataset, kind));
       tools.appendChild(toggle);
     }
+
+    // 水平误差基准（单选）：其他轨迹按同一时刻与它位置的直线距离对比
+    const base = document.createElement('button');
+    base.type = 'button';
+    base.className = 'win-toggle base-toggle';
+    base.textContent = '基准';
+    const isReference = dataset.id === state.referenceId;
+    base.classList.toggle('on', isReference);
+    base.setAttribute('aria-pressed', String(isReference));
+    base.title = isReference
+      ? '取消基准（水平误差 = 同一时刻与基准位置的水平距离）'
+      : '设为水平误差的基准';
+    base.addEventListener('click', () => toggleReference(dataset));
+    tools.appendChild(base);
 
     row.append(eye, color, name, count, remove, tools);
     dom.legendDatasets.appendChild(row);
@@ -1916,6 +1935,18 @@ function renderReadouts(win, status, epoch) {
     ? (FIX_TYPE[epoch.fixType] || `类型 ${epoch.fixType}`)
     : (epoch.fixQuality !== null ? (FIX_QUALITY[epoch.fixQuality] || `质量 ${epoch.fixQuality}`) : '—');
 
+  // 水平误差：同一时刻与图例里选定的基准位置之间的距离（基准自己显示为「基准」）
+  const reference = referenceDataset();
+  let errorText = '未选基准';
+  if (reference) {
+    if (reference === dataset) {
+      errorText = '基准';
+    } else {
+      const error = datasetHorizontalError(dataset, dataset.index);
+      errorText = error === null ? '基准无覆盖' : `${fmt(error, 2)} m`;
+    }
+  }
+
   const rows = [
     ['UTC 时间', epoch.datetime ? epoch.datetime.replace('T', ' ') : '—', 'utc'],
     ['纬度', fmt(epoch.lat, 9)],
@@ -1925,8 +1956,9 @@ function renderReadouts(win, status, epoch) {
     ['航向', epoch.course === null ? '—' : `${fmt(epoch.course, 1)}° ${compassPoint(epoch.course)}`],
     ['卫星 解算/可见', `${epoch.numSatsUsed === null ? '—' : epoch.numSatsUsed} / ${epoch.numSatsView === null ? '—' : epoch.numSatsView}`
       + `（显示 ${visible}）`],
+    ['水平误差', errorText],
     ['HDOP / PDOP', `${fmt(epoch.hdop, 2)} / ${fmt(epoch.pdop, 2)}`],
-    ['定位 / 椭球高', `${fixLabel} · ${ellipsoid === null ? '—' : `${fmt(ellipsoid, 2)} m`}`, 'wide'],
+    ['定位 / 椭球高', `${fixLabel} · ${ellipsoid === null ? '—' : `${fmt(ellipsoid, 2)} m`}`],
   ];
 
   holder.innerHTML = rows.map(([label, value, modifier]) => (
@@ -2927,6 +2959,10 @@ function addDataset(text, name) {
   state.datasets.push(dataset);
   state.compare.datasets.add(dataset.id);
   if (first) state.focusId = dataset.id;
+  // 上次会话选过基准：同名文件重新载入时恢复
+  if (!referenceDataset() && state.referenceName && dataset.name === state.referenceName) {
+    state.referenceId = dataset.id;
+  }
 
   // trace 数量变了，且新轨迹可能扩大视野
   state.mapReady = false;
@@ -2961,7 +2997,15 @@ function removeDataset(id) {
   if (state.focusId === id) {
     state.focusId = state.datasets.length ? state.datasets[0].id : null;
   }
-
+  // 基准被删除：一起清掉基准选择与水平误差曲线
+  if (state.referenceId === id) {
+    state.referenceId = null;
+    state.referenceName = '';
+    if (state.compare.metrics.includes('error')) {
+      state.compare.metrics = state.compare.metrics.filter((key) => key !== 'error');
+    }
+    saveCompareConfig();
+  }
   state.mapReady = false;
   state.view = null;
   buildCompareChips();
@@ -2973,6 +3017,7 @@ function removeDataset(id) {
     state.duration = 0;
     state.datasets = [];
     state.focusId = null;
+    state.referenceId = null;
     state.view = null;
     buildDatasetLegend();
     updateMapInfo();
@@ -3463,6 +3508,9 @@ function loadCompareConfig() {
         h: Math.max(COMPARE_MIN_HEIGHT, rect.h),
       };
     }
+    if (saved && typeof saved.reference === 'string') {
+      state.referenceName = saved.reference;
+    }
   } catch (error) {
     // 忽略损坏的配置
   }
@@ -3474,16 +3522,89 @@ function saveCompareConfig() {
       metrics: state.compare.metrics,
       align: state.compare.align,
       rect: state.compare.rect,
+      reference: state.referenceName,
     }));
   } catch (error) {
     // localStorage 不可用时忽略
   }
 }
 
-function compareValue(dataset, epoch, key) {
+/* ---------------- 水平误差基准（图例里选一条数据） ---------------- */
+/** 当前水平误差的基准数据集。 */
+function referenceDataset() {
+  if (!state.referenceId) return null;
+  return state.datasets.find((dataset) => dataset.id === state.referenceId) || null;
+}
+
+/** 基准在给定全局相对时刻的位置（线性插值；超出覆盖范围返回 null）。 */
+function referencePositionAt(reference, globalSeconds) {
+  const times = reference.times;
+  if (!times.length) return null;
+  const local = globalSeconds - datasetOffset(reference);
+  if (local < times[0] - 1e-6 || local > times[times.length - 1] + 1e-6) return null;
+
+  const positionOf = (epoch) => (
+    epoch && epoch.lat !== null && epoch.lon !== null
+      ? { lat: epoch.lat, lon: epoch.lon }
+      : null
+  );
+
+  const next = lowerBound(times, local);
+  if (next <= 0) return positionOf(reference.epochs[0]);
+  if (next >= times.length) return positionOf(reference.epochs[times.length - 1]);
+
+  const start = positionOf(reference.epochs[next - 1]);
+  const end = positionOf(reference.epochs[next]);
+  if (start && end) {
+    const span = times[next] - times[next - 1];
+    const ratio = span > 1e-9 ? (local - times[next - 1]) / span : 0;
+    return {
+      lat: start.lat + (end.lat - start.lat) * ratio,
+      lon: start.lon + (end.lon - start.lon) * ratio,
+    };
+  }
+  return start || end;
+}
+
+/** 某条轨迹第 index 个历元相对基准的水平误差（米）；没有基准 / 基准不覆盖时返回 null。 */
+function datasetHorizontalError(dataset, index) {
+  const reference = referenceDataset();
+  if (!reference || !dataset || reference === dataset) return null;
+  const epoch = dataset.epochs[index];
+  if (!epoch || epoch.lat === null || epoch.lon === null) return null;
+  if (!Number.isFinite(dataset.times[index])) return null;
+  const globalSeconds = datasetOffset(dataset) + dataset.times[index];
+  const position = referencePositionAt(reference, globalSeconds);
+  if (!position) return null;
+  return haversine(epoch.lat, epoch.lon, position.lat, position.lon);
+}
+
+/** 图例里切换基准：同一时间只能有一条数据当基准，再点一次取消。 */
+function toggleReference(dataset) {
+  if (!dataset) return;
+  const active = state.referenceId === dataset.id;
+  state.referenceId = active ? null : dataset.id;
+  state.referenceName = active ? '' : dataset.name;
+
+  if (!state.referenceId && state.compare.metrics.includes('error')) {
+    state.compare.metrics = state.compare.metrics.filter((key) => key !== 'error');
+    toast('已取消基准，水平误差曲线一并移除');
+  } else {
+    toast(active ? '已取消水平误差基准' : `水平误差基准：${dataset.name}`);
+  }
+
+  saveCompareConfig();
+  buildDatasetLegend();
+  buildCompareChips();
+  renderEpoch();
+  if (state.compare.open) renderCompare();
+}
+
+function compareValue(dataset, epoch, key, index = -1) {
   if (key === 'speed') return epoch.speedKmh;
   if (key === 'course') return epoch.course;
   if (key === 'sats') return epoch.numSatsView === null ? (epoch.satellites.size || null) : epoch.numSatsView;
+  if (key === 'error') return index >= 0 ? datasetHorizontalError(dataset, index) : null;
   if (key === 'cn0') {
     let sum = 0;
     let count = 0;
@@ -3562,7 +3683,7 @@ function compareSeries(dataset, key) {
   const y = [];
   for (let i = 0; i < dataset.epochs.length; i += 1) {
     x.push(compareAxisValue(dataset.times[i] + offset));
-    y.push(compareValue(dataset, dataset.epochs[i], key));
+    y.push(compareValue(dataset, dataset.epochs[i], key, i));
   }
   return { x, y };
 }
@@ -3753,13 +3874,23 @@ function buildCompareChips() {
 
   if (dom.compareMetrics) {
     dom.compareMetrics.innerHTML = '';
+    const hasReference = Boolean(referenceDataset());
     for (const [key, meta] of Object.entries(COMPARE_METRICS)) {
+      const needsReference = key === 'error';
+      const unavailable = needsReference && !hasReference;
       const chip = document.createElement('button');
       chip.type = 'button';
       chip.className = 'chip';
       chip.textContent = `${meta.name}${meta.unit ? ` (${meta.unit})` : ''}`;
-      chip.classList.toggle('off', !state.compare.metrics.includes(key));
+      chip.classList.toggle('off', unavailable || !state.compare.metrics.includes(key));
+      chip.title = unavailable
+        ? '先在图例里选择一条数据作为基准'
+        : (needsReference ? '同一时刻与本轨迹位置的水平距离，相对图例里选定的基准' : meta.name);
       chip.addEventListener('click', () => {
+        if (unavailable) {
+          toast('先在图例里选择一条数据作为基准', true);
+          return;
+        }
         const active = state.compare.metrics.includes(key);
         if (active && state.compare.metrics.length === 1) {
           toast('至少保留一项对比指标。', true);

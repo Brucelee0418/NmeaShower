@@ -1429,10 +1429,21 @@ function formatLayerSize(value) {
 }
 
 function layerPreviewStyle(meta, style) {
-  // 轨迹线 / 轨迹点 / 当前位置的颜色跟随数据集，预览用第一条数据的颜色
-  const color = meta.colorSource === 'dataset'
-    ? ((state.datasets[0] && state.datasets[0].color) || style.color)
-    : style.color;
+  // 轨迹线 / 轨迹点 / 当前位置的颜色跟随数据集，预览用第一条数据的颜色；
+  // 「基准连线」的颜色跟随对比轨迹，预览用当前聚焦的对比数据（没有则取第一条非基准）
+  let color;
+  if (meta.key === 'offset') {
+    const reference = referenceDataset();
+    const focus = focusDataset();
+    const comparison = focus && focus !== reference
+      ? focus
+      : state.datasets.find((dataset) => dataset !== reference);
+    color = (comparison && comparison.color) || style.color;
+  } else {
+    color = meta.colorSource === 'dataset'
+      ? ((state.datasets[0] && state.datasets[0].color) || style.color)
+      : style.color;
+  }
   if (meta.type === 'line') {
     return `--c:${color};--w:${Math.max(1, Math.min(6, style.size))}px`;
   }
@@ -1681,7 +1692,9 @@ function buildLayerLegend() {
     if (meta.colorSource === 'dataset') {
       // 颜色跟随数据集图例，这里不放颜色控件（避免多占一列把名字挤没）
       row.classList.add('follows-dataset');
-      name.title = '颜色跟随上方数据集';
+      name.title = meta.key === 'offset'
+        ? '颜色跟随各条对比轨迹；预览显示当前聚焦的对比数据'
+        : '颜色跟随上方数据集';
     }
 
     row.append(eye, name, preview, range);
@@ -3303,6 +3316,8 @@ function setFocus(id) {
   state.focusId = id;
   // 只换高亮，不重建图例行：双击图例条目时第二下仍要落在同一个元素上
   updateDatasetLegendFocus();
+  // 「基准连线」的图例预览跟随聚焦的对比数据
+  refreshLegendRow('offset');
   // 必须走完整的 renderEpoch：切换后顶部标签 / 时间轴 / 地图当前位置都要跟着变，
   // 只重画局部会留下上一个数据集的历元信息。
   renderEpoch();

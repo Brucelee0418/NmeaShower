@@ -31,6 +31,10 @@
       </select>
     </label>
 
+    <button id="btn-legend" class="button" type="button" aria-pressed="false" title="打开 / 关闭图例样式">
+      图例
+    </button>
+
     <button id="btn-compare" class="button" type="button" aria-pressed="false" title="打开 / 关闭对比曲线浮窗">
       对比曲线
     </button>
@@ -104,23 +108,43 @@
       <canvas id="marker-base-overlay" class="marker-overlay" aria-hidden="true"></canvas>
       <canvas id="marker-current-overlay" class="marker-overlay" aria-hidden="true"></canvas>
       <svg id="measure-overlay" class="measure-overlay" aria-hidden="true"></svg>
-      <div id="map-legend" class="map-legend">
-        <div class="legend-head">
-          <span class="legend-title">图例 · 样式</span>
-          <div class="legend-actions">
-            <button id="legend-windows" class="legend-reset" type="button" disabled
-                    title="加载数据后可打开星空图与仪表盘">展开窗口</button>
-            <button id="legend-reset" class="legend-reset" type="button" title="恢复默认颜色和大小">重置</button>
-            <button id="legend-toggle" class="legend-toggle" type="button" aria-expanded="true" title="收起图例">−</button>
-          </div>
-        </div>
-        <div id="legend-datasets" class="legend-datasets"></div>
-        <div id="legend-divider" class="legend-divider">图层样式</div>
-        <div id="legend-rows" class="legend-rows"></div>
-      </div>
       <div id="map-info" class="map-info"></div>
     </section>
   </main>
+
+  <section id="legend-style-window" class="legend-style-window" hidden>
+    <header id="legend-style-head" class="legend-window-head">
+      <span class="legend-window-title">图例样式</span>
+      <div class="legend-window-actions">
+        <button id="legend-windows" class="legend-reset" type="button" disabled
+                title="加载数据后可打开星空图与仪表盘">展开窗口</button>
+        <button id="legend-reset" class="legend-reset" type="button" title="恢复默认颜色和大小">重置</button>
+        <button id="legend-style-close" class="legend-toggle" type="button" title="收起图例样式">×</button>
+      </div>
+    </header>
+    <div class="legend-style-body">
+      <div id="legend-datasets" class="legend-datasets"></div>
+      <div id="legend-divider" class="legend-divider">图层样式</div>
+      <div id="legend-rows" class="legend-rows"></div>
+      <div class="legend-display-config">
+        <div class="legend-divider">图例显示</div>
+        <label class="legend-option master">
+          <input id="legend-display-visible" type="checkbox" checked />
+          显示图例窗口
+        </label>
+        <div id="legend-display-options" class="legend-options"></div>
+      </div>
+    </div>
+    <div class="float-resize" title="拖动调整大小"></div>
+  </section>
+
+  <section id="legend-window" class="legend-window" hidden>
+    <header id="legend-window-head" class="legend-window-head">
+      <span class="legend-window-title">图例</span>
+      <button id="legend-window-close" class="legend-toggle" type="button" title="隐藏图例">×</button>
+    </header>
+    <div id="legend-display" class="legend-display"></div>
+  </section>
 
   <div id="map-drag-label" class="map-drag-label" hidden></div>
 

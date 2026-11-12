@@ -155,6 +155,17 @@ const TRACK_SHAPE_VALUES = new Set(TRACK_SHAPES.map((shape) => shape.value));
 
 const LAYER_STYLE_KEY = 'nmea.mapLayerStyle.v1';
 
+const LEGEND_LAYOUT_KEY = 'nmea.legendLayout.v1';
+const LEGEND_DISPLAY_ITEMS = [
+  { key: 'datasets', label: '数据集' },
+  { key: 'line', label: '轨迹线' },
+  { key: 'track', label: '轨迹点' },
+  { key: 'start', label: '起点' },
+  { key: 'end', label: '终点' },
+  { key: 'current', label: '当前位置' },
+  { key: 'offset', label: '基准连线' },
+];
+
 /* ------------------------------------------------------------------ *
  * 多数据集
  * ------------------------------------------------------------------ */
@@ -669,7 +680,22 @@ const state = {
   mapReady: false,
   layerStyle: null,     // 轨迹线/点的图例样式，init 时从 localStorage 恢复
   datasetStyle: {},     // 按文件名记住的数据集颜色/显隐
-  legendCollapsed: false,
+  legend: {
+    styleOpen: false,
+    display: {
+      visible: true,
+      datasets: true,
+      line: true,
+      track: true,
+      start: true,
+      end: true,
+      current: true,
+      offset: true,
+    },
+    styleRect: null,
+    legendPos: null,
+  },
+  legendFrame: null,
   styleFrame: null,
   pendingStyleLayers: new Set(),
   pendingRender: false,
@@ -1960,7 +1986,299 @@ function layerPreviewStyle(meta, style) {
 function buildMapLegend() {
   buildDatasetLegend();
   buildLayerLegend();
-  setLegendCollapsed(state.legendCollapsed);
+  buildLegendDisplayOptions();
+  renderLegendWindow();
+  applyLegendWindowVisibility();
+}
+
+/* ------------------------------------------------------------------ *
+ * 图例样式 / 图例浮窗
+ * ------------------------------------------------------------------ */
+function legendClamp(value, min, max) {
+  return Math.min(Math.max(value, min), Math.max(min, max));
+}
+
+function applyLegendStyleRect() {
+  const element = dom.legendStyleWindow;
+  if (!element) return;
+  const saved = state.legend.styleRect;
+  const width = legendClamp(saved ? saved.w : 320, 280, window.innerWidth - 16);
+  const height = legendClamp(
+    saved ? saved.h : Math.min(540, Math.max(260, window.innerHeight - 130)),
+    240, window.innerHeight - 16,
+  );
+  const x = legendClamp(saved ? saved.x : Math.min(300, window.innerWidth - width - 8), 0, window.innerWidth - width);
+  const y = legendClamp(saved ? saved.y : 116, 0, window.innerHeight - height);
+  element.style.left = `${x}px`;
+  element.style.top = `${y}px`;
+  element.style.width = `${width}px`;
+  element.style.height = `${height}px`;
+  element.style.right = 'auto';
+  element.style.bottom = 'auto';
+}
+
+function applyLegendWindowPos() {
+  const element = dom.legendWindow;
+  if (!element || element.hidden) return;
+  const rect = element.getBoundingClientRect();
+  const width = rect.width || 236;
+  const height = rect.height || 120;
+  const pos = state.legend.legendPos;
+  element.style.left = `${legendClamp(pos ? pos.x : 12, 0, window.innerWidth - width)}px`;
+  element.style.top = `${legendClamp(pos ? pos.y : 116, 0, window.innerHeight - height)}px`;
+  element.style.right = 'auto';
+  element.style.bottom = 'auto';
+}
+
+function applyLegendWindowVisibility() {
+  const visible = Boolean(state.legend.display.visible);
+  if (dom.legendWindow) dom.legendWindow.hidden = !visible;
+  if (dom.legendDisplayVisible) dom.legendDisplayVisible.checked = visible;
+  if (visible) {
+    applyLegendWindowPos();
+    renderLegendWindow();
+  }
+}
+
+function setLegendStyleOpen(open) {
+  state.legend.styleOpen = Boolean(open);
+  if (!dom.legendStyleWindow || !dom.btnLegend) return;
+  dom.legendStyleWindow.hidden = !state.legend.styleOpen;
+  dom.btnLegend.setAttribute('aria-pressed', String(state.legend.styleOpen));
+  if (state.legend.styleOpen) {
+    applyLegendStyleRect();
+    renderLegendWindow();
+  }
+}
+
+function rememberLegendStyleRect() {
+  if (!dom.legendStyleWindow) return;
+  const rect = dom.legendStyleWindow.getBoundingClientRect();
+  state.legend.styleRect = {
+    x: Math.round(rect.left),
+    y: Math.round(rect.top),
+    w: Math.round(rect.width),
+    h: Math.round(rect.height),
+  };
+  saveLegendConfig();
+}
+
+function rememberLegendPos() {
+  if (!dom.legendWindow) return;
+  const rect = dom.legendWindow.getBoundingClientRect();
+  state.legend.legendPos = { x: Math.round(rect.left), y: Math.round(rect.top) };
+  saveLegendConfig();
+}
+
+function attachLegendStyleResize() {
+  const element = dom.legendStyleWindow;
+  const handle = element && element.querySelector('.float-resize');
+  if (!handle || handle.__resizeBound) return;
+  handle.__resizeBound = true;
+  handle.addEventListener('pointerdown', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = element.getBoundingClientRect();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const startWidth = rect.width;
+    const startHeight = rect.height;
+
+    const onMove = (moveEvent) => {
+      const width = legendClamp(startWidth + moveEvent.clientX - startX, 280, window.innerWidth - rect.left - 4);
+      const height = legendClamp(startHeight + moveEvent.clientY - startY, 240, window.innerHeight - rect.top - 4);
+      element.style.width = `${width}px`;
+      element.style.height = `${height}px`;
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      rememberLegendStyleRect();
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  });
+}
+
+function buildLegendDisplayOptions() {
+  if (!dom.legendDisplayOptions) return;
+  dom.legendDisplayOptions.innerHTML = '';
+  for (const item of LEGEND_DISPLAY_ITEMS) {
+    const label = document.createElement('label');
+    label.className = 'legend-option';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = Boolean(state.legend.display[item.key]);
+    input.addEventListener('change', () => {
+      state.legend.display[item.key] = input.checked;
+      saveLegendConfig();
+      renderLegendWindow();
+    });
+    label.append(input, document.createTextNode(item.label));
+    dom.legendDisplayOptions.appendChild(label);
+  }
+  if (dom.legendDisplayVisible) {
+    dom.legendDisplayVisible.checked = Boolean(state.legend.display.visible);
+  }
+}
+
+function drawLegendPoint(canvas, dataset) {
+  const cssSize = 20;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.round(cssSize * dpr);
+  canvas.height = Math.round(cssSize * dpr);
+  canvas.style.width = `${cssSize}px`;
+  canvas.style.height = `${cssSize}px`;
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssSize, cssSize);
+  const size = Math.min(16, Math.max(6, datasetPointSize(dataset)));
+  const path = new Path2D();
+  appendMarkerShape(path, datasetPointShape(dataset), cssSize / 2, cssSize / 2, size);
+  ctx.globalAlpha = 0.95;
+  ctx.fillStyle = dataset.color;
+  ctx.fill(path);
+}
+
+function renderLegendWindow() {
+  const root = dom.legendDisplay;
+  if (!root) return;
+  root.innerHTML = '';
+  if (!state.datasets.length) {
+    const empty = document.createElement('div');
+    empty.className = 'legend-display-empty';
+    empty.textContent = '未加载数据';
+    root.appendChild(empty);
+    return;
+  }
+
+  const display = state.legend.display;
+  let rows = 0;
+  if (display.datasets) {
+    const group = document.createElement('div');
+    group.className = 'legend-display-group';
+    for (const dataset of state.datasets) {
+      const row = document.createElement('div');
+      row.className = 'legend-display-item';
+      row.classList.toggle('off', !dataset.visible);
+      const swatch = document.createElement('span');
+      swatch.className = 'legend-display-swatch';
+      swatch.style.background = dataset.color;
+      const name = document.createElement('span');
+      name.className = 'legend-display-name';
+      name.textContent = dataset.name;
+      name.title = dataset.name;
+      row.append(swatch, name);
+      if (display.line) {
+        const line = document.createElement('span');
+        line.className = 'legend-display-line';
+        line.style.cssText = `--c:${dataset.color};--w:${datasetLineWidth(dataset)}px`;
+        row.appendChild(line);
+      }
+      if (display.track) {
+        const point = document.createElement('canvas');
+        point.className = 'legend-display-point';
+        row.appendChild(point);
+        drawLegendPoint(point, dataset);
+      }
+      group.appendChild(row);
+      rows += 1;
+    }
+    root.appendChild(group);
+  }
+
+  const common = [];
+  const startStyle = layerStyle('start');
+  const endStyle = layerStyle('end');
+  const currentStyle = layerStyle('current');
+  if (display.start) {
+    common.push({
+      label: '起点',
+      preview: (() => {
+        const dot = document.createElement('span');
+        dot.className = 'legend-display-dot';
+        dot.style.cssText = `--c:${startStyle.color};--s:${startStyle.size}px`;
+        return dot;
+      })(),
+    });
+  }
+  if (display.end) {
+    common.push({
+      label: '终点',
+      preview: (() => {
+        const dot = document.createElement('span');
+        dot.className = 'legend-display-dot';
+        dot.style.cssText = `--c:${endStyle.color};--s:${endStyle.size}px`;
+        return dot;
+      })(),
+    });
+  }
+  if (display.current) {
+    const focus = focusDataset();
+    common.push({
+      label: '当前位置',
+      preview: (() => {
+        const dot = document.createElement('span');
+        dot.className = 'legend-display-dot current';
+        dot.style.cssText = `--c:${focus ? focus.color : '#f59e0b'};--s:${currentStyle.size}px`;
+        return dot;
+      })(),
+    });
+  }
+  if (display.offset && referenceDataset()) {
+    const reference = referenceDataset();
+    const focus = focusDataset();
+    const comparison = focus && focus !== reference
+      ? focus
+      : state.datasets.find((dataset) => dataset !== reference);
+    common.push({
+      label: '基准连线',
+      preview: (() => {
+        const line = document.createElement('span');
+        line.className = 'legend-display-line';
+        line.style.cssText = `--c:${comparison ? comparison.color : '#64748b'};`
+          + `--w:${layerStyle('offset').size}px`;
+        return line;
+      })(),
+    });
+  }
+  if (common.length) {
+    const group = document.createElement('div');
+    group.className = 'legend-display-group';
+    for (const item of common) {
+      const row = document.createElement('div');
+      row.className = 'legend-display-item';
+      const name = document.createElement('span');
+      name.className = 'legend-display-name';
+      name.textContent = item.label;
+      row.append(item.preview, name);
+      group.appendChild(row);
+      rows += 1;
+    }
+    root.appendChild(group);
+  }
+
+  if (!rows) {
+    const empty = document.createElement('div');
+    empty.className = 'legend-display-empty';
+    empty.textContent = '图例内容为空';
+    root.appendChild(empty);
+  }
+}
+
+function scheduleLegendWindow() {
+  if (state.legendFrame !== null) return;
+  state.legendFrame = requestAnimationFrame(() => {
+    state.legendFrame = null;
+    renderLegendWindow();
+  });
+}
+
+function clampLegendWindows() {
+  if (state.legend.styleOpen) applyLegendStyleRect();
+  if (state.legend.display.visible) {
+    applyLegendWindowPos();
+  }
 }
 
 /* ---------------- 数据集图例 ---------------- */
@@ -2043,6 +2361,7 @@ function rememberDatasetStyle(dataset) {
     pointShape: datasetPointShape(dataset),
   };
   saveDatasetStyle();
+  scheduleLegendWindow();
 }
 
 /** 只更新一条轨迹的线宽，不重建整张地图（拖动线宽滑杆时用）。 */
@@ -2067,6 +2386,7 @@ function buildDatasetLegend() {
     empty.textContent = '拖入一个或多个 NMEA 文件以开始对比';
     dom.legendDatasets.appendChild(empty);
     updateLegendWindowsButton();
+    scheduleLegendWindow();
     return;
   }
 
@@ -2240,6 +2560,7 @@ function buildDatasetLegend() {
     remove.addEventListener('click', () => removeDataset(dataset.id));
   }
   updateLegendWindowsButton();
+  scheduleLegendWindow();
 }
 
 /** 数据集换色时，同步浮窗标题色点、指南针指针与仪表盘配色。 */
@@ -2349,6 +2670,7 @@ function buildLayerLegend() {
       setLayerStyle(meta.key, { size: Number(slider.value) });
     });
   }
+  scheduleLegendWindow();
 }
 
 function refreshLegendRow(layer) {
@@ -2365,25 +2687,18 @@ function refreshLegendRow(layer) {
   row.querySelector('.legend-value').textContent = formatLayerSize(style.size);
 }
 
-function setLegendCollapsed(collapsed) {
-  state.legendCollapsed = collapsed;
-  if (!dom.mapLegend) return;
-  dom.mapLegend.classList.toggle('collapsed', collapsed);
-  dom.legendToggle.textContent = collapsed ? '+' : '−';
-  dom.legendToggle.title = collapsed ? '展开图例' : '收起图例';
-  dom.legendToggle.setAttribute('aria-expanded', String(!collapsed));
-}
-
 function applyLayerStyle(layer) {
   if (!state.mapReady || !state.datasets.length) return;
   const style = layerStyle(layer);
   // 轨迹点 / 起点 / 终点 / 当前位置由 canvas 覆盖层绘制，Plotly trace 始终隐藏
   if (layer === 'track') {
     scheduleMarkerBase();
+    scheduleLegendWindow();
     return;
   }
   if (layer === 'start' || layer === 'end' || layer === 'current') {
     scheduleMarkerDraw();
+    scheduleLegendWindow();
     return;
   }
   const indices = state.datasets.map((dataset, ordinal) => traceIndexFor(ordinal, layer));
@@ -2396,6 +2711,7 @@ function applyLayerStyle(layer) {
       'line.width': style.size,
       'line.color': state.datasets.map((dataset) => dataset.color),
     }, indices);
+    scheduleLegendWindow();
     return;
   }
   if (layer === 'line') {
@@ -2405,6 +2721,7 @@ function applyLayerStyle(layer) {
       'line.color': state.datasets.map((dataset) => dataset.color),
     }, indices);
   }
+  scheduleLegendWindow();
 }
 
 function scheduleLayerStyle(layer) {
@@ -3958,6 +4275,7 @@ function setFocus(id) {
   // 相对起点对齐时 x 轴与光标以聚焦数据为参照，换焦点必须重画；
   // 绝对 UTC 对齐时坐标不变，保留用户对曲线的缩放。
   if (state.compare.open && state.compare.align === 'relative') renderCompare();
+  scheduleLegendWindow();
 }
 
 /** 把一份 NMEA 文本添加为一条数据集。 */
@@ -4176,6 +4494,58 @@ function loadWindowLayout() {
 function saveWindowLayout() {
   try {
     localStorage.setItem(WINDOW_LAYOUT_KEY, JSON.stringify(state.windowLayout));
+  } catch (error) {
+    // localStorage 不可用时忽略
+  }
+}
+
+/** 图例样式 / 图例浮窗的位置、尺寸和显示内容。 */
+function loadLegendConfig() {
+  const config = {
+    display: {
+      visible: true,
+      datasets: true,
+      line: true,
+      track: true,
+      start: true,
+      end: true,
+      current: true,
+      offset: true,
+    },
+    styleRect: null,
+    legendPos: null,
+  };
+  try {
+    const saved = JSON.parse(localStorage.getItem(LEGEND_LAYOUT_KEY) || 'null');
+    if (!saved || typeof saved !== 'object') return config;
+    if (saved.display && typeof saved.display === 'object') {
+      for (const key of Object.keys(config.display)) {
+        if (typeof saved.display[key] === 'boolean') config.display[key] = saved.display[key];
+      }
+    }
+    const style = saved.styleRect;
+    if (style && ['x', 'y', 'w', 'h'].every((key) => Number.isFinite(Number(style[key])))) {
+      config.styleRect = {
+        x: Number(style.x), y: Number(style.y), w: Number(style.w), h: Number(style.h),
+      };
+    }
+    const pos = saved.legendPos;
+    if (pos && Number.isFinite(Number(pos.x)) && Number.isFinite(Number(pos.y))) {
+      config.legendPos = { x: Number(pos.x), y: Number(pos.y) };
+    }
+  } catch (error) {
+    // 设置损坏时用默认值
+  }
+  return config;
+}
+
+function saveLegendConfig() {
+  try {
+    localStorage.setItem(LEGEND_LAYOUT_KEY, JSON.stringify({
+      display: state.legend.display,
+      styleRect: state.legend.styleRect,
+      legendPos: state.legend.legendPos,
+    }));
   } catch (error) {
     // localStorage 不可用时忽略
   }
@@ -4650,6 +5020,7 @@ function toggleReference(dataset) {
   updateDatasetLegendFocus();
   renderCompareCursor();
   if (state.compare.open) renderCompare();
+  scheduleLegendWindow();
 }
 
 function compareValue(dataset, epoch, key, index = -1) {
@@ -5161,7 +5532,7 @@ function bindCompareClick() {
 }
 
 /** 可拖动的浮窗标题栏（对比曲线使用）。 */
-function attachWindowDrag(windowElement, handle) {
+function attachWindowDrag(windowElement, handle, onEnd) {
   if (!windowElement || !handle || handle.__dragBound) return;
   handle.__dragBound = true;
   handle.addEventListener('pointerdown', (event) => {
@@ -5186,6 +5557,7 @@ function attachWindowDrag(windowElement, handle) {
     const onUp = () => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
+      if (typeof onEnd === 'function') onEnd();
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
@@ -5225,11 +5597,19 @@ function cacheDom() {
   dom.measureUndo = document.getElementById('measure-undo');
   dom.measureClear = document.getElementById('measure-clear');
   dom.measureDone = document.getElementById('measure-done');
-  dom.mapLegend = document.getElementById('map-legend');
+  dom.btnLegend = document.getElementById('btn-legend');
+  dom.legendStyleWindow = document.getElementById('legend-style-window');
+  dom.legendStyleHead = document.getElementById('legend-style-head');
+  dom.legendStyleClose = document.getElementById('legend-style-close');
+  dom.legendWindow = document.getElementById('legend-window');
+  dom.legendWindowHead = document.getElementById('legend-window-head');
+  dom.legendWindowClose = document.getElementById('legend-window-close');
+  dom.legendDisplay = document.getElementById('legend-display');
+  dom.legendDisplayVisible = document.getElementById('legend-display-visible');
+  dom.legendDisplayOptions = document.getElementById('legend-display-options');
   dom.legendRows = document.getElementById('legend-rows');
   dom.legendDatasets = document.getElementById('legend-datasets');
   dom.legendDivider = document.getElementById('legend-divider');
-  dom.legendToggle = document.getElementById('legend-toggle');
   dom.legendReset = document.getElementById('legend-reset');
   dom.legendWindows = document.getElementById('legend-windows');
   dom.fileInput = document.getElementById('file-input');
@@ -5273,10 +5653,36 @@ function bindEvents() {
   dom.btnBack.addEventListener('click', () => stepTime(-1));
   dom.btnFwd.addEventListener('click', () => stepTime(1));
 
-  dom.legendToggle.addEventListener('click', () => {
-    setLegendCollapsed(!state.legendCollapsed);
-  });
   dom.legendReset.addEventListener('click', resetLayerStyle);
+
+  // 图例样式 / 图例浮窗
+  if (dom.btnLegend) {
+    dom.btnLegend.addEventListener('click', () => setLegendStyleOpen(!state.legend.styleOpen));
+  }
+  if (dom.legendStyleClose) {
+    dom.legendStyleClose.addEventListener('click', () => setLegendStyleOpen(false));
+  }
+  if (dom.legendWindowClose) {
+    dom.legendWindowClose.addEventListener('click', () => {
+      state.legend.display.visible = false;
+      saveLegendConfig();
+      applyLegendWindowVisibility();
+    });
+  }
+  if (dom.legendDisplayVisible) {
+    dom.legendDisplayVisible.addEventListener('change', () => {
+      state.legend.display.visible = dom.legendDisplayVisible.checked;
+      saveLegendConfig();
+      applyLegendWindowVisibility();
+    });
+  }
+  if (dom.legendStyleWindow) {
+    attachWindowDrag(dom.legendStyleWindow, dom.legendStyleHead, rememberLegendStyleRect);
+    attachLegendStyleResize();
+  }
+  if (dom.legendWindow) {
+    attachWindowDrag(dom.legendWindow, dom.legendWindowHead, rememberLegendPos);
+  }
 
   // 一次打开 / 收起全部轨迹的星空图与仪表盘
   if (dom.legendWindows) {
@@ -5398,6 +5804,7 @@ function bindEvents() {
     positionToolbox();
     scheduleMeasureDraw();
     scheduleMarkerDraw();
+    clampLegendWindows();
   });
   setupResizeObserver();
 
@@ -5431,6 +5838,7 @@ function init() {
   state.datasetStyle = loadDatasetStyle();
   state.layerStyle = loadLayerStyle();
   state.windowLayout = loadWindowLayout();
+  state.legend = { ...state.legend, ...loadLegendConfig(), styleOpen: false };
   loadCompareConfig();
 
   buildMapLegend();

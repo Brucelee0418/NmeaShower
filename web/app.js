@@ -673,6 +673,8 @@ const state = {
   windowFrame: null,
   timelineDrag: null,   // 轨道上的拖动状态：改标尺 / 平移窗口 / 定位当前时刻
   mapDrag: null,        // 拖动地图上的「当前位置」点：{ dataset, clientX, clientY, frame, ... }
+  measure: { active: false, points: [] },  // 地图距离测量：WGS84 顶点
+  measureFrame: null,
   windowLayout: {},     // 浮窗位置：{ 'sky:文件名': {x,y,w,h} }
   resizeObserver: null,
   resizeFrame: null,
@@ -1046,6 +1048,7 @@ function renderMap(full = false) {
     Plotly.react('map', mapData(), layout, PLOT_CONFIG);
     state.mapReady = true;
     attachMapInteractions();
+    ensureMeasureMapEvents();
     return;
   }
 
@@ -1334,7 +1337,7 @@ function onMapPointDragEnd(event) {
   window.removeEventListener('pointercancel', onMapPointDragEnd);
   window.removeEventListener('blur', onMapPointDragEnd);
   hideMapDragLabel();
-  setMapCursor('');
+  setMapCursor(mapIdleCursor());
 }
 
 /** 地图上的当前位置点：按下拖动改时间；悬停显示该点的时间。只需绑定一次。 */
@@ -1356,7 +1359,7 @@ function attachMapPointInteractions() {
     const hit = currentMarkerAt(event);
     if (!hit) {
       hideMapDragLabel();
-      setMapCursor('');
+      setMapCursor(mapIdleCursor());
       return;
     }
     setMapCursor('grab');
@@ -1375,8 +1378,244 @@ function attachMapPointInteractions() {
   element.addEventListener('pointerleave', () => {
     if (state.mapDrag) return;
     hideMapDragLabel();
-    setMapCursor('');
+    setMapCursor(mapIdleCursor());
   });
+}
+
+/* ------------------------------------------------------------------ *
+ * 工具箱：地图距离测量
+ * ------------------------------------------------------------------ */
+const MEASURE_NS = 'http://www.w3.org/2000/svg';
+
+/** 测量模式下的空闲光标：十字准星提示可以点选。 */
+function mapIdleCursor() {
+  return state.measure.active ? 'crosshair' : '';
+}
+
+function formatDistance(meters) {
+  if (!Number.isFinite(meters)) return '—';
+  if (meters >= 1000) return `${(meters / 1000).toFixed(2)} km`;
+  if (meters >= 100) return `${meters.toFixed(1)} m`;
+  return `${meters.toFixed(2)} m`;
+}
+
+/** 已选点之间的分段距离与总长（WGS84 上的球面距离）。 */
+function measureSegments() {
+  const points = state.measure.points;
+  const segments = [];
+  let total = 0;
+  for (let i = 1; i < points.length; i += 1) {
+    const length = haversine(
+      points[i - 1].lat, points[i - 1].lon,
+      points[i].lat, points[i].lon,
+    );
+    segments.push({ length });
+    total += length;
+  }
+  return { segments, total };
+}
+
+function updateMeasureReadout() {
+  const points = state.measure.points;
+  const { segments, total } = measureSegments();
+  if (dom.measureReadout) {
+    if (!points.length) {
+      dom.measureReadout.textContent = state.measure.active
+        ? '点击地图添加第一个点'
+        : '在地图上点选两点或多点，测量各段与总距离';
+    } else if (points.length === 1) {
+      dom.measureReadout.textContent = '已选 1 个点，继续点第二个点';
+    } else {
+      const last = segments[segments.length - 1];
+      dom.measureReadout.textContent = `${points.length} 个点 · 总长 ${formatDistance(total)}`
+        + ` · 最后一段 ${formatDistance(last.length)}`;
+    }
+  }
+  if (dom.measureUndo) dom.measureUndo.disabled = !points.length;
+  if (dom.measureClear) dom.measureClear.disabled = !points.length;
+  if (dom.measureDone) dom.measureDone.disabled = !state.measure.active;
+  if (dom.btnMeasure) {
+    dom.btnMeasure.classList.toggle('active', state.measure.active);
+    dom.btnMeasure.setAttribute('aria-pressed', String(state.measure.active));
+  }
+}
+
+/** 把测量点投影到地图容器像素，画成 SVG 折线 + 点 + 分段 / 总长标签。 */
+function renderMeasureOverlay() {
+  const svg = dom.measureOverlay;
+  if (!svg) return;
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+  const map = mapboxMap();
+  const points = state.measure.points;
+  if (!map || !points.length) return;
+  const mapRect = map.getContainer().getBoundingClientRect();
+  const svgRect = svg.getBoundingClientRect();
+  if (!svgRect.width || !svgRect.height) return;
+  const dx = mapRect.left - svgRect.left;
+  const dy = mapRect.top - svgRect.top;
+
+  const projected = points.map((point) => {
+    const [lat, lon] = toDisplay(point.lat, point.lon);
+    const screen = map.project([lon, lat]);
+    return { x: screen.x + dx, y: screen.y + dy };
+  });
+
+  const add = (tag, attrs) => {
+    const node = document.createElementNS(MEASURE_NS, tag);
+    for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+    svg.appendChild(node);
+    return node;
+  };
+
+  const { segments, total } = measureSegments();
+  if (projected.length > 1) {
+    add('polyline', {
+      class: 'measure-line',
+      points: projected.map((point) => `${point.x},${point.y}`).join(' '),
+    });
+    segments.forEach((segment, index) => {
+      const a = projected[index];
+      const b = projected[index + 1];
+      const vx = b.x - a.x;
+      const vy = b.y - a.y;
+      const length = Math.hypot(vx, vy) || 1;
+      // 标签放在线段中点的法线方向，避免压住折线
+      const label = add('text', {
+        class: 'measure-label',
+        x: (a.x + b.x) / 2 + (-vy / length) * 9,
+        y: (a.y + b.y) / 2 + (vx / length) * 9,
+      });
+      label.textContent = formatDistance(segment.length);
+    });
+  }
+
+  projected.forEach((point) => add('circle', {
+    class: 'measure-point', cx: point.x, cy: point.y, r: 4,
+  }));
+
+  if (projected.length > 1) {
+    const last = projected[projected.length - 1];
+    const label = add('text', {
+      class: 'measure-label measure-total',
+      x: last.x + 13,
+      y: last.y - 12,
+    });
+    label.textContent = `总长 ${formatDistance(total)}`;
+  }
+}
+
+function scheduleMeasureDraw() {
+  if (state.measureFrame !== null) return;
+  state.measureFrame = requestAnimationFrame(() => {
+    state.measureFrame = null;
+    renderMeasureOverlay();
+  });
+}
+
+/** 把 Mapbox 地图的点击 / 视野变化接到测量工具上。 */
+function attachMeasureMapEvents() {
+  const map = mapboxMap();
+  if (!map) return false;
+  if (map.__measureBound) return true;
+  map.__measureBound = true;
+  map.on('click', onMeasureMapClick);
+  map.on('move', scheduleMeasureDraw);
+  map.on('resize', scheduleMeasureDraw);
+  map.once('idle', scheduleMeasureDraw);
+  // 测量时双击会连发两次 click，先关掉双击缩放，避免叠点和误缩放
+  if (state.measure.active) map.doubleClickZoom.disable();
+  scheduleMeasureDraw();
+  return true;
+}
+
+/** 地图可能刚重建，Mapbox 实例晚一帧才可用时再补一次绑定。 */
+function ensureMeasureMapEvents() {
+  if (attachMeasureMapEvents()) return;
+  requestAnimationFrame(() => {
+    if (attachMeasureMapEvents()) return;
+    setTimeout(() => attachMeasureMapEvents(), 300);
+  });
+}
+
+function onMeasureMapClick(event) {
+  if (!state.measure.active) return;
+  const lat = event.lngLat.lat;
+  const lon = event.lngLat.lng;
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+  // 存 WGS84；高德 / Google 底图上的点击先做 GCJ-02 → WGS84
+  const [wgsLat, wgsLon] = GCJ02_SOURCES.has(state.mapSource)
+    ? gcj02ToWgs84(lat, lon)
+    : [lat, lon];
+  // 双击会连发两次 click，别在同一个位置叠两个点
+  const last = state.measure.points[state.measure.points.length - 1];
+  if (last && haversine(last.lat, last.lon, wgsLat, wgsLon) < 0.05) return;
+  state.measure.points.push({ lat: wgsLat, lon: wgsLon });
+  renderMeasureOverlay();
+  updateMeasureReadout();
+}
+
+function setMeasuring(active) {
+  if (active && !state.mapReady) {
+    toast('请先加载 NMEA 文件，再在地图上测量距离', true);
+    return;
+  }
+  state.measure.active = Boolean(active);
+  const map = mapboxMap();
+  if (map) {
+    if (state.measure.active) map.doubleClickZoom.disable();
+    else map.doubleClickZoom.enable();
+  }
+  if (state.measure.active) {
+    ensureMeasureMapEvents();
+  }
+  setMapCursor(state.measure.active ? 'crosshair' : mapIdleCursor());
+  updateMeasureReadout();
+}
+
+function positionToolbox() {
+  const panel = dom.toolboxPanel;
+  const button = dom.btnToolbox;
+  if (!panel || !button || panel.hidden) return;
+  const rect = button.getBoundingClientRect();
+  const width = panel.offsetWidth || 248;
+  const height = panel.offsetHeight || 190;
+  const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
+  const top = Math.min(rect.bottom + 6, window.innerHeight - height - 8);
+  panel.style.left = `${left}px`;
+  panel.style.top = `${top}px`;
+}
+
+function openToolbox() {
+  if (!dom.toolboxPanel || !dom.btnToolbox) return;
+  dom.toolboxPanel.hidden = false;
+  dom.btnToolbox.classList.add('active');
+  dom.btnToolbox.setAttribute('aria-expanded', 'true');
+  positionToolbox();
+}
+
+function closeToolbox() {
+  if (!dom.toolboxPanel || !dom.btnToolbox) return;
+  dom.toolboxPanel.hidden = true;
+  dom.btnToolbox.classList.remove('active');
+  dom.btnToolbox.setAttribute('aria-expanded', 'false');
+  if (state.measure.active) setMeasuring(false);
+}
+
+function toggleToolbox() {
+  if (!dom.toolboxPanel) return;
+  if (dom.toolboxPanel.hidden) openToolbox();
+  else closeToolbox();
+}
+
+function resetMeasurement() {
+  state.measure.points = [];
+  state.measure.active = false;
+  const map = mapboxMap();
+  if (map) map.doubleClickZoom.enable();
+  renderMeasureOverlay();
+  updateMeasureReadout();
+  setMapCursor('');
 }
 
 /* ------------------------------------------------------------------ *
@@ -3426,6 +3665,7 @@ function removeDataset(id) {
     state.focusId = null;
     state.referenceId = null;
     state.view = null;
+    resetMeasurement();
     buildDatasetLegend();
     buildLayerLegend();
     updateMapInfo();
@@ -4577,6 +4817,14 @@ function cacheDom() {
   dom.epochLabel = document.getElementById('epoch-label');
   dom.mapInfo = document.getElementById('map-info');
   dom.mapDragLabel = document.getElementById('map-drag-label');
+  dom.measureOverlay = document.getElementById('measure-overlay');
+  dom.btnToolbox = document.getElementById('btn-toolbox');
+  dom.toolboxPanel = document.getElementById('toolbox-panel');
+  dom.btnMeasure = document.getElementById('btn-measure');
+  dom.measureReadout = document.getElementById('measure-readout');
+  dom.measureUndo = document.getElementById('measure-undo');
+  dom.measureClear = document.getElementById('measure-clear');
+  dom.measureDone = document.getElementById('measure-done');
   dom.mapLegend = document.getElementById('map-legend');
   dom.legendRows = document.getElementById('legend-rows');
   dom.legendDatasets = document.getElementById('legend-datasets');
@@ -4669,7 +4917,47 @@ function bindEvents() {
     dom.compareWindow.addEventListener('pointerdown', () => bringToFront(dom.compareWindow));
   }
 
+  // 工具箱：距离测量
+  if (dom.btnToolbox) {
+    dom.btnToolbox.addEventListener('click', toggleToolbox);
+  }
+  if (dom.btnMeasure) {
+    dom.btnMeasure.addEventListener('click', () => setMeasuring(!state.measure.active));
+  }
+  if (dom.measureUndo) {
+    dom.measureUndo.addEventListener('click', () => {
+      state.measure.points.pop();
+      renderMeasureOverlay();
+      updateMeasureReadout();
+    });
+  }
+  if (dom.measureClear) {
+    dom.measureClear.addEventListener('click', () => {
+      state.measure.points = [];
+      renderMeasureOverlay();
+      updateMeasureReadout();
+    });
+  }
+  if (dom.measureDone) {
+    dom.measureDone.addEventListener('click', () => setMeasuring(false));
+  }
+  document.addEventListener('pointerdown', (event) => {
+    if (!dom.toolboxPanel || dom.toolboxPanel.hidden) return;
+    if (dom.toolboxPanel.contains(event.target) || dom.btnToolbox.contains(event.target)) return;
+    // 测量时点地图要保持面板可见，方便看总长
+    if (state.measure.active) return;
+    closeToolbox();
+  });
+
   document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && state.measure.active) {
+      setMeasuring(false);
+      return;
+    }
+    if (event.key === 'Escape' && dom.toolboxPanel && !dom.toolboxPanel.hidden) {
+      closeToolbox();
+      return;
+    }
     if (event.key === 'Escape' && state.compare.open) {
       setCompareOpen(false);
       return;
@@ -4705,7 +4993,11 @@ function bindEvents() {
     handleFiles(event.dataTransfer && event.dataTransfer.files);
   });
 
-  window.addEventListener('resize', () => resizePlots());
+  window.addEventListener('resize', () => {
+    resizePlots();
+    positionToolbox();
+    scheduleMeasureDraw();
+  });
   setupResizeObserver();
 
   window.addEventListener('error', (event) => {

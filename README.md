@@ -240,6 +240,8 @@ Google / OSM 瓦片在部分网络（尤其大陆）无法直连。`serve.py` �
 | Google 卫星（Earth，`lyrs=s`）/ Google 街道（`lyrs=m`） | GCJ-02 | 瓦片带 `gl=cn`，与大陆 GCJ-02 路网一致；前端同样做纠偏 |
 | OpenStreetMap | WGS84 | 直接使用 |
 
+缩放上限跟随瓦片源：卫星影像 19、高德街道 / 卫星 18、Google 卫星 / 街道 20、OSM 19（无底图按 19）。到上限后滚轮会停住；切到上限更低的底图时视野会收在该上限，避免请求不存在的瓦片导致底图空白。
+
 ![高德街道底图（GCJ-02 纠偏）](docs/screenshot-gaode.jpg)
 
 地图瓦片通过 `serve.py` 的 `/tiles/{source}/{z}/{x}/{y}` 代理获取（同时解决 CORS 与 ArcGIS 的 `{z}/{y}/{x}` 顺序问题），并缓存在 `.cache/tiles`。Google 卫星 / 街道底图请求的是 `mt1.google.com` 的 `lyrs=s` / `lyrs=m` 瓦片，代理层带 `gl=cn` 与浏览器 UA；这两个源和 OSM 在检测到代理时走代理，其余源直连。

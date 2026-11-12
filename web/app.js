@@ -738,6 +738,26 @@ function mapZoomLimit(source) {
   return Math.max(2, TILE_MAX_ZOOM[source] || 19);
 }
 
+/**
+ * 把底图的瓦片上限写给 Mapbox GL：滚轮 / 双击到上限就停住，
+ * 不会先放大过头再被 plotly_relayout 拉回来（那种回拉看起来像「缩小」）。
+ */
+function applyMapZoomCap() {
+  const map = mapboxMap();
+  if (!map || typeof map.setMaxZoom !== 'function') return false;
+  const limit = mapZoomLimit(state.mapSource);
+  if (map.getMaxZoom() !== limit) map.setMaxZoom(limit);
+  return true;
+}
+
+function ensureMapZoomCap() {
+  if (applyMapZoomCap()) return;
+  requestAnimationFrame(() => {
+    if (applyMapZoomCap()) return;
+    setTimeout(applyMapZoomCap, 300);
+  });
+}
+
 function mapLayout() {
   const layout = {
     margin: { l: 0, r: 0, t: 0, b: 0 },
@@ -752,8 +772,11 @@ function mapLayout() {
 
   // 用户手动缩放/平移过（或切换底图时保留了视野）就以当前视野为准
   if (state.view) {
+    const limit = mapZoomLimit(state.mapSource);
+    // 换到上限更低的底图时把记录也收下来，避免再换回去时莫名放大
+    if (state.view.zoom > limit) state.view.zoom = limit;
     layout.mapbox.center = viewCenterFor(state.mapSource) || { ...state.view.center };
-    layout.mapbox.zoom = Math.min(state.view.zoom, mapZoomLimit(state.mapSource));
+    layout.mapbox.zoom = state.view.zoom;
     return layout;
   }
 
@@ -1049,6 +1072,7 @@ function renderMap(full = false) {
     state.mapReady = true;
     attachMapInteractions();
     ensureMeasureMapEvents();
+    ensureMapZoomCap();
     return;
   }
 
@@ -1090,6 +1114,8 @@ function attachMapInteractions() {
     // Plotly 不会把 maxzoom 传给 mapbox-gl，滚轮能一直放大到超出瓦片范围，
     // 超过后底图会变空白，所以这里主动把镜头收回可用级别
     const limit = mapZoomLimit(state.mapSource);
+    const liveMap = mapboxMap();
+    if (liveMap && liveMap.getMaxZoom() !== limit) liveMap.setMaxZoom(limit);
     const clamped = Math.min(mapbox.zoom, limit);
     state.view = {
       zoom: clamped,

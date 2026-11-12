@@ -717,6 +717,11 @@ const state = {
   measureFrame: null,
   markerBaseFrame: null,     // 轨迹点 / 起点 / 终点覆盖层的重绘帧
   markerCurrentFrame: null,  // 当前位置覆盖层的重绘帧
+  locks: [],                 // 锁定的轨迹点：{ id, key, datasetId, epochIndex, lat, lon, timeText }
+  lockSeq: 0,
+  lockFrame: null,
+  trackHover: null,          // 当前悬停的轨迹点信息
+  trackHoverTimer: null,
   windowLayout: {},     // 浮窗位置：{ 'sky:文件名': {x,y,w,h} }
   resizeObserver: null,
   resizeFrame: null,
@@ -1116,6 +1121,7 @@ function renderMap(full = false) {
     ensureMapZoomCap();
     ensureMarkerMapEvents();
     scheduleMarkerDraw();
+    scheduleLockPosition();
     return;
   }
 
@@ -1403,19 +1409,25 @@ function attachMapPointInteractions() {
   // capture：先于 mapbox 的拖拽处理，命中当前位置点时不要平移地图
   element.addEventListener('pointerdown', (event) => {
     if (event.button !== 0 || state.mapDrag) return;
+    hideTrackHover();
     const hit = currentMarkerAt(event);
     if (!hit) return;
     beginMapPointDrag(event, hit);
   }, true);
 
   element.addEventListener('pointermove', (event) => {
-    if (state.mapDrag || event.buttons !== 0) return;
+    if (state.mapDrag || event.buttons !== 0) {
+      hideTrackHover();
+      return;
+    }
     const hit = currentMarkerAt(event);
     if (!hit) {
       hideMapDragLabel();
       setMapCursor(mapIdleCursor());
+      updateTrackHover(event);
       return;
     }
+    hideTrackHover();
     setMapCursor('grab');
     const epoch = hit.dataset.epochs[hit.dataset.index] || null;
     showMapDragLabel(
@@ -1433,6 +1445,7 @@ function attachMapPointInteractions() {
     if (state.mapDrag) return;
     hideMapDragLabel();
     setMapCursor(mapIdleCursor());
+    hideTrackHover(300);
   });
 }
 
@@ -1621,6 +1634,7 @@ function setMeasuring(active) {
     else map.doubleClickZoom.enable();
   }
   if (state.measure.active) {
+    hideTrackHover();
     ensureMeasureMapEvents();
   }
   setMapCursor(state.measure.active ? 'crosshair' : mapIdleCursor());
@@ -1893,10 +1907,17 @@ function attachMarkerMapEvents() {
   if (!map) return false;
   if (map.__markerBound) return true;
   map.__markerBound = true;
-  map.on('move', scheduleMarkerDraw);
-  map.on('resize', scheduleMarkerDraw);
-  map.once('idle', scheduleMarkerDraw);
-  scheduleMarkerDraw();
+  const onViewChange = () => {
+    scheduleMarkerDraw();
+    scheduleLockPosition();
+  };
+  map.on('move', () => {
+    hideTrackHover();
+    onViewChange();
+  });
+  map.on('resize', onViewChange);
+  map.once('idle', onViewChange);
+  onViewChange();
   return true;
 }
 
@@ -1906,6 +1927,345 @@ function ensureMarkerMapEvents() {
     if (attachMarkerMapEvents()) return;
     setTimeout(attachMarkerMapEvents, 300);
   });
+}
+
+/* ------------------------------------------------------------------ *
+ * 轨迹点悬停卡片 / 锁定标记
+ *
+ * 悬停普通轨迹点时显示 名称 / 时间 / 水平误差 / 锁定按钮；锁定后卡片
+ * 固定在该点上，随地图平移缩放重新投影；工具栏「锁定标记」一键锁定
+ * 当前位置（聚焦数据集的当前历元）。
+ * ------------------------------------------------------------------ */
+function lockKeyFor(info) {
+  return `${info.dataset.id}:${info.epochIndex}`;
+}
+
+function lockInfoFor(dataset, epochIndex) {
+  if (!dataset) return null;
+  const epoch = dataset.epochs[epochIndex];
+  if (!epoch || epoch.lat === null || epoch.lon === null) return null;
+  const stamp = epochStamp(epoch);
+  const timeText = stamp !== null
+    ? mapClockText(stamp, epoch.time || '—')
+    : (epoch.time || '—');
+  return {
+    dataset,
+    epochIndex,
+    lat: epoch.lat,
+    lon: epoch.lon,
+    timeText,
+    key: `${dataset.id}:${epochIndex}`,
+  };
+}
+
+function lockErrorText(info) {
+  const reference = referenceDataset();
+  if (!reference) return null;
+  if (reference === info.dataset) return '基准';
+  const error = datasetHorizontalError(info.dataset, info.epochIndex);
+  return error === null ? '基准无覆盖' : `${fmt(error, 2)} m`;
+}
+
+function addLockRow(card, label, value) {
+  const row = document.createElement('div');
+  row.className = 'map-lock-row';
+  const key = document.createElement('span');
+  key.textContent = label;
+  const text = document.createElement('b');
+  text.textContent = value;
+  row.append(key, text);
+  card.appendChild(row);
+}
+
+function buildLockCard(card, info, locked, onAction) {
+  card.innerHTML = '';
+  const head = document.createElement('div');
+  head.className = 'map-lock-head';
+  const dot = document.createElement('span');
+  dot.className = 'map-lock-dot';
+  dot.style.background = info.dataset.color;
+  const name = document.createElement('span');
+  name.className = 'map-lock-name';
+  name.textContent = info.dataset.name;
+  name.title = info.dataset.name;
+  head.append(dot, name);
+  if (locked) {
+    const tag = document.createElement('span');
+    tag.className = 'map-lock-tag';
+    tag.textContent = '已锁定';
+    head.appendChild(tag);
+  }
+  card.appendChild(head);
+
+  addLockRow(card, '时间', info.timeText);
+  const errorText = lockErrorText(info);
+  if (errorText !== null) addLockRow(card, '误差', errorText);
+
+  const actions = document.createElement('div');
+  actions.className = 'map-lock-actions';
+  const action = document.createElement('button');
+  action.type = 'button';
+  action.className = locked ? 'map-lock-action' : 'map-lock-action primary';
+  action.textContent = locked ? '取消' : '锁定';
+  action.title = locked ? '取消锁定' : '锁定这个轨迹点';
+  action.addEventListener('click', (event) => {
+    event.stopPropagation();
+    onAction();
+  });
+  actions.appendChild(action);
+  card.appendChild(actions);
+}
+
+function positionLockItem(item, lat, lon, map, dx, dy, width) {
+  const [displayLat, displayLon] = toDisplay(lat, lon);
+  if (displayLat === null || displayLon === null) {
+    item.hidden = true;
+    return;
+  }
+  const point = map.project([displayLon, displayLat]);
+  const x = point.x + dx;
+  const y = point.y + dy;
+  item.hidden = false;
+  item.style.left = `${x}px`;
+  item.style.top = `${y}px`;
+  item.classList.toggle('below', y < 104);
+  const half = 112;
+  let shift = 0;
+  if (x < half) shift = half - x;
+  else if (x > width - half) shift = (width - half) - x;
+  item.style.setProperty('--shift', `${Math.round(shift)}px`);
+}
+
+function lockOverlayOffset() {
+  const map = mapboxMap();
+  const layer = dom.mapLockLayer;
+  if (!map || !layer) return null;
+  const mapRect = map.getContainer().getBoundingClientRect();
+  const layerRect = layer.getBoundingClientRect();
+  if (layerRect.width < 1 || layerRect.height < 1) return null;
+  return {
+    map,
+    dx: mapRect.left - layerRect.left,
+    dy: mapRect.top - layerRect.top,
+    width: layerRect.width,
+  };
+}
+
+function positionLockCards() {
+  if (!dom.mapLockList) return;
+  const offset = lockOverlayOffset();
+  if (!offset) {
+    for (const item of dom.mapLockList.children) item.hidden = true;
+    if (dom.mapTrackHover) dom.mapTrackHover.hidden = true;
+    return;
+  }
+  for (const item of dom.mapLockList.children) {
+    const lock = state.locks.find((entry) => entry.id === item.dataset.lock);
+    const dataset = lock ? state.datasets.find((entry) => entry.id === lock.datasetId) : null;
+    if (!lock || !dataset || !dataset.visible) {
+      item.hidden = true;
+      continue;
+    }
+    positionLockItem(item, lock.lat, lock.lon, offset.map, offset.dx, offset.dy, offset.width);
+  }
+  if (state.trackHover && dom.mapTrackHover && !dom.mapTrackHover.hidden) {
+    const info = state.trackHover;
+    if (info.dataset.visible) {
+      positionLockItem(dom.mapTrackHover, info.lat, info.lon, offset.map, offset.dx, offset.dy, offset.width);
+    } else {
+      dom.mapTrackHover.hidden = true;
+    }
+  }
+}
+
+function scheduleLockPosition() {
+  if (state.lockFrame !== null) return;
+  state.lockFrame = requestAnimationFrame(() => {
+    state.lockFrame = null;
+    positionLockCards();
+  });
+}
+
+function updateLockButton() {
+  if (!dom.btnLock) return;
+  const count = state.locks.length;
+  dom.btnLock.title = count
+    ? `锁定当前位置的轨迹点（已锁定 ${count} 个）`
+    : '锁定当前位置的轨迹点';
+  dom.btnLock.classList.toggle('has-locks', count > 0);
+}
+
+function renderLockCards() {
+  if (!dom.mapLockList) return;
+  dom.mapLockList.innerHTML = '';
+  for (const lock of state.locks) {
+    const dataset = state.datasets.find((entry) => entry.id === lock.datasetId);
+    if (!dataset) continue;
+    const info = lockInfoFor(dataset, lock.epochIndex);
+    if (!info) continue;
+    const item = document.createElement('div');
+    item.className = 'map-lock-item locked';
+    item.dataset.lock = lock.id;
+    const pin = document.createElement('span');
+    pin.className = 'map-lock-pin';
+    pin.style.background = dataset.color;
+    const card = document.createElement('div');
+    card.className = 'map-lock-card';
+    buildLockCard(card, info, true, () => removeLock(lock.id));
+    item.append(pin, card);
+    dom.mapLockList.appendChild(item);
+  }
+  updateLockButton();
+  positionLockCards();
+}
+
+function addLock(info) {
+  if (!info) return false;
+  if (state.locks.some((lock) => lock.key === info.key)) return false;
+  state.locks.push({
+    id: `lock-${++state.lockSeq}`,
+    key: info.key,
+    datasetId: info.dataset.id,
+    epochIndex: info.epochIndex,
+    lat: info.lat,
+    lon: info.lon,
+  });
+  renderLockCards();
+  return true;
+}
+
+function removeLock(id) {
+  const index = state.locks.findIndex((lock) => lock.id === id);
+  if (index < 0) return;
+  state.locks.splice(index, 1);
+  renderLockCards();
+}
+
+function lockCurrentPosition() {
+  const dataset = focusDataset();
+  if (!dataset) {
+    toast('请先加载 NMEA 文件', true);
+    return;
+  }
+  if (!dataset.visible) {
+    toast('当前数据已隐藏，先在地图图例里显示它', true);
+    return;
+  }
+  if (datasetState(dataset) !== 'ok') {
+    toast('当前位置不在该数据的时间范围内', true);
+    return;
+  }
+  const info = lockInfoFor(dataset, dataset.index);
+  if (!info) {
+    toast('当前位置没有有效定位', true);
+    return;
+  }
+  if (addLock(info)) toast('已锁定当前位置');
+  else toast('当前位置已经锁定');
+}
+
+/** 轨迹点下标 → 历元下标（轨迹数组只保留有定位的历元）。 */
+function epochIndexForTrack(dataset, trackIndex) {
+  const time = dataset.track.time[trackIndex];
+  if (!Number.isFinite(time)) return -1;
+  const index = lowerBound(dataset.times, time);
+  if (index < dataset.times.length && Math.abs(dataset.times[index] - time) <= 1e-4) return index;
+  if (index > 0 && Math.abs(dataset.times[index - 1] - time) <= 1e-4) return index - 1;
+  return -1;
+}
+
+function trackPointAt(event) {
+  if (!state.mapReady || state.measure.active || state.mapDrag) return null;
+  if (!layerStyle('track').visible) return null;
+  const map = mapboxMap();
+  if (!map) return null;
+  const rect = map.getContainer().getBoundingClientRect();
+  const px = event.clientX - rect.left;
+  const py = event.clientY - rect.top;
+  let best = null;
+  for (const dataset of state.datasets) {
+    if (!dataset.visible) continue;
+    const display = displayTrack(dataset);
+    const [first, last] = windowSlice(dataset);
+    if (last <= first) continue;
+    const radius = Math.max(8, datasetPointSize(dataset) / 2 + 3);
+    const radius2 = radius * radius;
+    for (let i = first; i < last; i += 1) {
+      const point = map.project([display.lon[i], display.lat[i]]);
+      const dx = point.x - px;
+      const dy = point.y - py;
+      const distance2 = dx * dx + dy * dy;
+      if (distance2 > radius2) continue;
+      if (best && distance2 >= best.distance2) continue;
+      const epochIndex = epochIndexForTrack(dataset, i);
+      if (epochIndex < 0) continue;
+      best = { dataset, epochIndex, distance2 };
+    }
+  }
+  return best;
+}
+
+function showTrackHover(info) {
+  if (!info || !dom.mapTrackHover) return;
+  clearTimeout(state.trackHoverTimer);
+  state.trackHoverTimer = null;
+  if (state.locks.some((lock) => lock.key === info.key)) {
+    hideTrackHover();
+    return;
+  }
+  state.trackHover = info;
+  const pin = dom.mapTrackHover.querySelector('.map-lock-pin');
+  if (pin) pin.style.background = info.dataset.color;
+  const card = dom.mapTrackHover.querySelector('.map-lock-card');
+  if (card) {
+    buildLockCard(card, info, false, () => {
+      addLock(info);
+      hideTrackHover();
+    });
+  }
+  dom.mapTrackHover.hidden = false;
+  positionLockCards();
+}
+
+function hideTrackHover(delay = 0) {
+  clearTimeout(state.trackHoverTimer);
+  state.trackHoverTimer = null;
+  const hide = () => {
+    state.trackHover = null;
+    if (dom.mapTrackHover) dom.mapTrackHover.hidden = true;
+  };
+  if (delay > 0) {
+    state.trackHoverTimer = setTimeout(hide, delay);
+  } else {
+    hide();
+  }
+}
+
+function updateTrackHover(event) {
+  if (state.measure.active || state.mapDrag) {
+    hideTrackHover();
+    return;
+  }
+  const hit = trackPointAt(event);
+  if (!hit) {
+    hideTrackHover(220);
+    return;
+  }
+  if (state.locks.some((lock) => lock.key === `${hit.dataset.id}:${hit.epochIndex}`)) {
+    hideTrackHover();
+    return;
+  }
+  const info = lockInfoFor(hit.dataset, hit.epochIndex);
+  if (!info) {
+    hideTrackHover();
+    return;
+  }
+  if (state.trackHover && state.trackHover.key === info.key) {
+    clearTimeout(state.trackHoverTimer);
+    state.trackHoverTimer = null;
+    return;
+  }
+  showTrackHover(info);
 }
 
 /* ------------------------------------------------------------------ *
@@ -2522,6 +2882,7 @@ function buildDatasetLegend() {
       rememberDatasetStyle(dataset);
       row.classList.toggle('off', !dataset.visible);
       renderMap(true);
+      scheduleLockPosition();
       updateMapInfo();
       buildCompareChips();
       renderCompare();
@@ -2536,6 +2897,8 @@ function buildDatasetLegend() {
       }
       state.mapReady = false;
       renderMap(true);
+      hideTrackHover();
+      renderLockCards();
       buildCompareChips();
       renderCompare();
     });
@@ -4323,6 +4686,7 @@ function addDataset(text, name) {
   // 上次会话选过基准：同名文件重新载入时恢复
   if (!referenceDataset() && state.referenceName && dataset.name === state.referenceName) {
     state.referenceId = dataset.id;
+    renderLockCards();
   }
 
   // trace 数量变了，且新轨迹可能扩大视野
@@ -4356,6 +4720,11 @@ function removeDataset(id) {
   for (const kind of WINDOW_ORDER) closeDatasetWindow(removed, kind, { remember: false });
   state.datasets.splice(index, 1);
   state.compare.datasets.delete(id);
+  if (state.locks.some((lock) => lock.datasetId === id)) {
+    state.locks = state.locks.filter((lock) => lock.datasetId !== id);
+    renderLockCards();
+  }
+  hideTrackHover();
   if (state.focusId === id) {
     state.focusId = state.datasets.length ? state.datasets[0].id : null;
   }
@@ -4368,6 +4737,7 @@ function removeDataset(id) {
     }
     saveCompareConfig();
   }
+  renderLockCards();
   state.mapReady = false;
   state.view = null;
   buildCompareChips();
@@ -4382,6 +4752,8 @@ function removeDataset(id) {
     state.referenceId = null;
     state.view = null;
     resetMeasurement();
+    state.locks = [];
+    renderLockCards();
     buildDatasetLegend();
     buildLayerLegend();
     updateMapInfo();
@@ -5020,6 +5392,8 @@ function toggleReference(dataset) {
   updateDatasetLegendFocus();
   renderCompareCursor();
   if (state.compare.open) renderCompare();
+  hideTrackHover();
+  renderLockCards();
   scheduleLegendWindow();
 }
 
@@ -5589,6 +5963,10 @@ function cacheDom() {
   dom.mapDragLabel = document.getElementById('map-drag-label');
   dom.markerBaseOverlay = document.getElementById('marker-base-overlay');
   dom.markerCurrentOverlay = document.getElementById('marker-current-overlay');
+  dom.mapLockLayer = document.getElementById('map-lock-layer');
+  dom.mapLockList = document.getElementById('map-lock-list');
+  dom.mapTrackHover = document.getElementById('map-track-hover');
+  dom.btnLock = document.getElementById('btn-lock');
   dom.measureOverlay = document.getElementById('measure-overlay');
   dom.btnToolbox = document.getElementById('btn-toolbox');
   dom.toolboxPanel = document.getElementById('toolbox-panel');
@@ -5726,6 +6104,16 @@ function bindEvents() {
   // 工具箱：距离测量
   if (dom.btnToolbox) {
     dom.btnToolbox.addEventListener('click', toggleToolbox);
+  if (dom.btnLock) {
+    dom.btnLock.addEventListener('click', lockCurrentPosition);
+  }
+  if (dom.mapTrackHover) {
+    dom.mapTrackHover.addEventListener('pointerenter', () => {
+      clearTimeout(state.trackHoverTimer);
+      state.trackHoverTimer = null;
+    });
+    dom.mapTrackHover.addEventListener('pointerleave', () => hideTrackHover(150));
+  }
   }
   if (dom.btnMeasure) {
     dom.btnMeasure.addEventListener('click', () => setMeasuring(!state.measure.active));
@@ -5804,6 +6192,7 @@ function bindEvents() {
     positionToolbox();
     scheduleMeasureDraw();
     scheduleMarkerDraw();
+    scheduleLockPosition();
     clampLegendWindows();
   });
   setupResizeObserver();

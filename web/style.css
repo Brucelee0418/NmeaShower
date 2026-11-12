@@ -1481,6 +1481,136 @@ body.dragging::after {
   text-anchor: start;
 }
 
+/* ---------------- 轨迹点悬停 / 锁定标记 ---------------- */
+.map-lock-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.map-lock-list {
+  position: absolute;
+  inset: 0;
+}
+
+.map-lock-item {
+  position: absolute;
+  width: 0;
+  height: 0;
+}
+
+.map-lock-item[hidden] { display: none; }
+
+.map-lock-pin {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 10px;
+  height: 10px;
+  margin: -5px 0 0 -5px;
+  border-radius: 50%;
+  background: #f59e0b;
+  border: 2px solid #ffffff;
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.35), 0 2px 6px rgba(15, 23, 42, 0.3);
+}
+
+.map-lock-card {
+  position: absolute;
+  left: 0;
+  bottom: 14px;
+  transform: translateX(calc(-50% + var(--shift, 0px)));
+  min-width: 174px;
+  max-width: 230px;
+  padding: 7px 9px;
+  background: rgba(15, 23, 42, 0.95);
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.34);
+  color: #f8fafc;
+  font-size: 10.5px;
+  line-height: 1.45;
+  pointer-events: auto;
+}
+
+.map-lock-item.below .map-lock-card {
+  bottom: auto;
+  top: 14px;
+}
+
+.map-lock-item.hover .map-lock-card {
+  border-color: rgba(96, 165, 250, 0.75);
+}
+
+.map-lock-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 3px;
+}
+
+.map-lock-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.map-lock-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.map-lock-tag {
+  flex: none;
+  margin-left: auto;
+  color: #fbbf24;
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.map-lock-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: #cbd5e1;
+}
+
+.map-lock-row b {
+  color: #f8fafc;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.map-lock-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 5px;
+}
+
+.map-lock-action {
+  appearance: none;
+  padding: 2px 8px;
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  border-radius: 5px;
+  background: rgba(51, 65, 85, 0.8);
+  color: #f8fafc;
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.map-lock-action.primary {
+  background: #2563eb;
+  border-color: #3b82f6;
+}
+
+.map-lock-action:hover { filter: brightness(1.12); }
+
 /* ---------------- 提示 ---------------- */
 .toast {
   position: fixed;
@@ -1521,6 +1651,11 @@ body.dragging::after {
   background: #1d4ed8;
   border-color: #2563eb;
   color: #ffffff;
+}
+
+#btn-lock.has-locks {
+  border-color: #f59e0b;
+  color: #fbbf24;
 }
 
 /* 跟随数据集配色的图层行少一列（无独立颜色控件） */

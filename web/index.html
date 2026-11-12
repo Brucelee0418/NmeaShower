@@ -43,6 +43,8 @@
       工具箱
     </button>
 
+    <button id="btn-lock" class="button" type="button" title="锁定当前位置的轨迹点">锁定标记</button>
+
     <span id="epoch-label" class="epoch-label">未加载数据</span>
   </header>
 
@@ -108,6 +110,13 @@
       <canvas id="marker-base-overlay" class="marker-overlay" aria-hidden="true"></canvas>
       <canvas id="marker-current-overlay" class="marker-overlay" aria-hidden="true"></canvas>
       <svg id="measure-overlay" class="measure-overlay" aria-hidden="true"></svg>
+      <div id="map-lock-layer" class="map-lock-layer">
+        <div id="map-lock-list" class="map-lock-list"></div>
+        <div id="map-track-hover" class="map-lock-item hover" hidden>
+          <span class="map-lock-pin"></span>
+          <div class="map-lock-card"></div>
+        </div>
+      </div>
       <div id="map-info" class="map-info"></div>
     </section>
   </main>

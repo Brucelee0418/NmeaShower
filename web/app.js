@@ -122,7 +122,18 @@ function traceIndexFor(ordinal, layer) {
 
 const MAP_LAYER_META = [
   { key: 'line', name: '轨迹线', type: 'line', min: 1, max: 8, step: 0.5, colorSource: 'dataset' },
-  { key: 'track', name: '轨迹点', type: 'point', min: 2, max: 12, step: 0.5, colorSource: 'dataset' },
+  {
+    key: 'track', name: '轨迹点', type: 'point', min: 2, max: 12, step: 0.5, colorSource: 'dataset',
+    shapes: [
+      { value: 'circle', label: '圆点' },
+      { value: 'square', label: '方块' },
+      { value: 'triangle', label: '三角' },
+      { value: 'diamond', label: '菱形' },
+      { value: 'star', label: '星形' },
+      { value: 'cross', label: '十字' },
+      { value: 'x', label: '叉号' },
+    ],
+  },
   { key: 'start', name: '起点', type: 'point', min: 6, max: 24, step: 1 },
   { key: 'end', name: '终点', type: 'point', min: 6, max: 24, step: 1 },
   { key: 'current', name: '当前位置', type: 'point', min: 6, max: 28, step: 1, colorSource: 'dataset' },
@@ -132,12 +143,15 @@ const MAP_LAYER_META = [
 
 const DEFAULT_LAYER_STYLE = {
   line: { color: '#2563eb', size: 2, visible: true },
-  track: { color: '#2563eb', size: 3.5, visible: true },
+  track: { color: '#2563eb', size: 3.5, visible: true, shape: 'circle' },
   start: { color: '#16a34a', size: 10, visible: true },
   end: { color: '#dc2626', size: 10, visible: true },
   current: { color: '#f59e0b', size: 15, visible: true },
   offset: { color: '#64748b', size: 2.5, visible: true },
 };
+
+const TRACK_SHAPES = MAP_LAYER_META.find((meta) => meta.key === 'track').shapes;
+const TRACK_SHAPE_VALUES = new Set(TRACK_SHAPES.map((shape) => shape.value));
 
 const LAYER_STYLE_KEY = 'nmea.mapLayerStyle.v1';
 
@@ -675,6 +689,8 @@ const state = {
   mapDrag: null,        // 拖动地图上的「当前位置」点：{ dataset, clientX, clientY, frame, ... }
   measure: { active: false, points: [] },  // 地图距离测量：WGS84 顶点
   measureFrame: null,
+  markerBaseFrame: null,     // 轨迹点 / 起点 / 终点覆盖层的重绘帧
+  markerCurrentFrame: null,  // 当前位置覆盖层的重绘帧
   windowLayout: {},     // 浮窗位置：{ 'sky:文件名': {x,y,w,h} }
   resizeObserver: null,
   resizeFrame: null,
@@ -917,8 +933,8 @@ function mapLineTrace(lons, lats, dataset) {
 function mapPointTrace(lons, lats, layer, name, dataset, covered = true) {
   const style = layerStyle(layer);
   const followsDataset = layer === 'line' || layer === 'track' || layer === 'current';
-  // 当前时刻落在该数据范围外时，不把「当前位置」钉在端点，否则看起来像真的走到了那里
-  const inRange = layer !== 'current' || covered;
+  // 点标记统一由地图上的 canvas 覆盖层绘制（支持形状选择），
+  // 这里保留隐藏 trace 占位，保证每个数据集的 trace 下标稳定。
   return {
     type: 'scattermapbox',
     mode: 'markers',
@@ -928,9 +944,8 @@ function mapPointTrace(lons, lats, layer, name, dataset, covered = true) {
       size: style.size,
       color: followsDataset ? dataset.color : style.color,
       opacity: layer === 'track' ? 0.95 : 1,
-      line: layer === 'current' ? { color: '#ffffff', width: 1.5 } : undefined,
     },
-    visible: style.visible && dataset.visible && inRange,
+    visible: false,
     hoverinfo: 'skip',
     name: `${dataset.name} ${name}`,
   };
@@ -1073,26 +1088,13 @@ function renderMap(full = false) {
     attachMapInteractions();
     ensureMeasureMapEvents();
     ensureMapZoomCap();
+    ensureMarkerMapEvents();
+    scheduleMarkerDraw();
     return;
   }
 
-  // 快路径：只挪动各数据集的「当前位置」
-  const indices = [];
-  const lons = [];
-  const lats = [];
-  const visible = [];
-  const style = layerStyle('current');
-  state.datasets.forEach((dataset, ordinal) => {
-    indices.push(traceIndexFor(ordinal, 'current'));
-    const epoch = dataset.epochs[dataset.index] || null;
-    const [lat, lon] = epoch ? toDisplay(epoch.lat, epoch.lon) : [null, null];
-    lons.push(lon !== null ? [lon] : []);
-    lats.push(lat !== null ? [lat] : []);
-    // 越界时隐藏当前位置点（与整量渲染保持一致）
-    visible.push(style.visible && dataset.visible && datasetState(dataset) === 'ok');
-  });
-  if (!indices.length) return;
-  Plotly.restyle('map', { lon: lons, lat: lats, visible }, indices);
+  // 快路径：时间变化只更新「当前位置」覆盖层
+  scheduleMarkerCurrent();
 }
 
 /**
@@ -1645,6 +1647,242 @@ function resetMeasurement() {
 }
 
 /* ------------------------------------------------------------------ *
+ * 地图点标记：轨迹点 / 起点 / 终点 / 当前位置
+ *
+ * 轨迹点需要支持形状选择，而 Plotly + 内联 mapbox style 的 symbol 图层
+ * 依赖 sprite，非 circle 的标记会静默不显示；这里改成在 canvas 覆盖层上
+ * 自己画（起点 / 终点 / 当前位置也一起画，保证层级正确）。
+ * 对应 Plotly trace 仍保留但设为隐藏，用来维持 trace 下标稳定。
+ * ------------------------------------------------------------------ */
+function markerShape(value) {
+  return TRACK_SHAPE_VALUES.has(value) ? value : 'circle';
+}
+
+function prepareMarkerCanvas(canvas) {
+  if (!canvas) return null;
+  const rect = canvas.getBoundingClientRect();
+  if (rect.width < 1 || rect.height < 1) return null;
+  const dpr = window.devicePixelRatio || 1;
+  const width = Math.max(1, Math.round(rect.width * dpr));
+  const height = Math.max(1, Math.round(rect.height * dpr));
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, rect.width, rect.height);
+  return { ctx, rect };
+}
+
+/** 往 Path2D 里追加一个标记形状，x/y 是覆盖层的 CSS 像素坐标。 */
+function appendMarkerShape(path, shape, x, y, size) {
+  const r = size / 2;
+  switch (shape) {
+    case 'square':
+      path.rect(x - r, y - r, size, size);
+      break;
+    case 'triangle':
+      path.moveTo(x, y - r);
+      path.lineTo(x + r * 0.95, y + r * 0.82);
+      path.lineTo(x - r * 0.95, y + r * 0.82);
+      path.closePath();
+      break;
+    case 'diamond':
+      path.moveTo(x, y - r);
+      path.lineTo(x + r, y);
+      path.lineTo(x, y + r);
+      path.lineTo(x - r, y);
+      path.closePath();
+      break;
+    case 'star': {
+      const inner = r * 0.45;
+      for (let i = 0; i < 10; i += 1) {
+        const radius = i % 2 === 0 ? r : inner;
+        const angle = -Math.PI / 2 + (i * Math.PI) / 5;
+        const px = x + Math.cos(angle) * radius;
+        const py = y + Math.sin(angle) * radius;
+        if (i === 0) path.moveTo(px, py);
+        else path.lineTo(px, py);
+      }
+      path.closePath();
+      break;
+    }
+    case 'cross':
+      path.rect(x - r, y - r * 0.3, size, r * 0.6);
+      path.rect(x - r * 0.3, y - r, r * 0.6, size);
+      break;
+    case 'x': {
+      const half = r * 0.82;
+      const thick = r * 0.28;
+      for (const angle of [Math.PI / 4, -Math.PI / 4]) {
+        const ux = Math.cos(angle);
+        const uy = Math.sin(angle);
+        const vx = -uy;
+        const vy = ux;
+        const ax = x + ux * half;
+        const ay = y + uy * half;
+        const bx = x - ux * half;
+        const by = y - uy * half;
+        path.moveTo(ax + vx * thick, ay + vy * thick);
+        path.lineTo(ax - vx * thick, ay - vy * thick);
+        path.lineTo(bx - vx * thick, by - vy * thick);
+        path.lineTo(bx + vx * thick, by + vy * thick);
+        path.closePath();
+      }
+      break;
+    }
+    default:
+      path.moveTo(x + r, y);
+      path.arc(x, y, r, 0, Math.PI * 2);
+      path.closePath();
+      break;
+  }
+}
+
+/** 与测量覆盖层一样，把地图容器坐标换算到覆盖层坐标。 */
+function markerOverlayOffset(canvas, rect) {
+  const map = mapboxMap();
+  if (!map) return null;
+  const mapRect = map.getContainer().getBoundingClientRect();
+  return {
+    map,
+    dx: mapRect.left - rect.left,
+    dy: mapRect.top - rect.top,
+    width: rect.width,
+    height: rect.height,
+  };
+}
+
+function renderMarkerBase() {
+  const prepared = prepareMarkerCanvas(dom.markerBaseOverlay);
+  if (!prepared) return;
+  const { ctx, rect } = prepared;
+  const info = markerOverlayOffset(dom.markerBaseOverlay, rect);
+  if (!info) return;
+  const { map, dx, dy, width, height } = info;
+
+  const trackStyle = layerStyle('track');
+  const startStyle = layerStyle('start');
+  const endStyle = layerStyle('end');
+  const shape = markerShape(trackStyle.shape);
+
+  if (trackStyle.visible) {
+    for (const dataset of state.datasets) {
+      if (!dataset.visible) continue;
+      const track = visibleTrack(dataset);
+      if (!track.lat.length) continue;
+      const size = trackStyle.size;
+      const radius = size / 2;
+      const path = new Path2D();
+      for (let i = 0; i < track.lat.length; i += 1) {
+        const point = map.project([track.lon[i], track.lat[i]]);
+        const x = point.x + dx;
+        const y = point.y + dy;
+        if (x < -radius || x > width + radius || y < -radius || y > height + radius) continue;
+        appendMarkerShape(path, shape, x, y, size);
+      }
+      ctx.globalAlpha = 0.95;
+      ctx.fillStyle = dataset.color;
+      ctx.fill(path);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  // 起点 / 终点画在轨迹点上面
+  ctx.globalAlpha = 1;
+  for (const dataset of state.datasets) {
+    if (!dataset.visible) continue;
+    const display = displayTrack(dataset);
+    if (!display.lat.length) continue;
+    if (startStyle.visible) {
+      const point = map.project([display.lon[0], display.lat[0]]);
+      ctx.beginPath();
+      ctx.arc(point.x + dx, point.y + dy, startStyle.size / 2, 0, Math.PI * 2);
+      ctx.fillStyle = startStyle.color;
+      ctx.fill();
+    }
+    if (endStyle.visible) {
+      const last = display.lat.length - 1;
+      const point = map.project([display.lon[last], display.lat[last]]);
+      ctx.beginPath();
+      ctx.arc(point.x + dx, point.y + dy, endStyle.size / 2, 0, Math.PI * 2);
+      ctx.fillStyle = endStyle.color;
+      ctx.fill();
+    }
+  }
+}
+
+function renderMarkerCurrent() {
+  const prepared = prepareMarkerCanvas(dom.markerCurrentOverlay);
+  if (!prepared) return;
+  const { ctx, rect } = prepared;
+  const info = markerOverlayOffset(dom.markerCurrentOverlay, rect);
+  if (!info) return;
+  const { map, dx, dy } = info;
+  const style = layerStyle('current');
+  if (!style.visible) return;
+
+  for (const dataset of state.datasets) {
+    if (!dataset.visible) continue;
+    if (datasetState(dataset) !== 'ok') continue;
+    const epoch = dataset.epochs[dataset.index];
+    if (!epoch || epoch.lat === null || epoch.lon === null) continue;
+    const [lat, lon] = toDisplay(epoch.lat, epoch.lon);
+    if (lat === null || lon === null) continue;
+    const point = map.project([lon, lat]);
+    ctx.beginPath();
+    ctx.arc(point.x + dx, point.y + dy, style.size / 2, 0, Math.PI * 2);
+    ctx.fillStyle = dataset.color;
+    ctx.fill();
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = '#ffffff';
+    ctx.stroke();
+  }
+}
+
+function scheduleMarkerBase() {
+  if (state.markerBaseFrame !== null) return;
+  state.markerBaseFrame = requestAnimationFrame(() => {
+    state.markerBaseFrame = null;
+    renderMarkerBase();
+  });
+}
+
+function scheduleMarkerCurrent() {
+  if (state.markerCurrentFrame !== null) return;
+  state.markerCurrentFrame = requestAnimationFrame(() => {
+    state.markerCurrentFrame = null;
+    renderMarkerCurrent();
+  });
+}
+
+function scheduleMarkerDraw() {
+  scheduleMarkerBase();
+  scheduleMarkerCurrent();
+}
+
+function attachMarkerMapEvents() {
+  const map = mapboxMap();
+  if (!map) return false;
+  if (map.__markerBound) return true;
+  map.__markerBound = true;
+  map.on('move', scheduleMarkerDraw);
+  map.on('resize', scheduleMarkerDraw);
+  map.once('idle', scheduleMarkerDraw);
+  scheduleMarkerDraw();
+  return true;
+}
+
+function ensureMarkerMapEvents() {
+  if (attachMarkerMapEvents()) return;
+  requestAnimationFrame(() => {
+    if (attachMarkerMapEvents()) return;
+    setTimeout(attachMarkerMapEvents, 300);
+  });
+}
+
+/* ------------------------------------------------------------------ *
  * 地图图例 / 样式面板
  * ------------------------------------------------------------------ */
 function cloneDefaultLayerStyle() {
@@ -1674,6 +1912,10 @@ function loadLayerStyle() {
         target.size = DEFAULT_LAYER_STYLE.offset.size;
       }
       if (typeof value.visible === 'boolean') target.visible = value.visible;
+      if (Array.isArray(meta.shapes) && typeof value.shape === 'string'
+        && meta.shapes.some((shape) => shape.value === value.shape)) {
+        target.shape = value.shape;
+      }
     }
   } catch (error) {
     // 本地设置损坏或 localStorage 不可用时退回默认样式
@@ -1940,6 +2182,21 @@ function buildLayerLegend() {
     preview.className = `legend-preview ${meta.type}`;
     preview.style.cssText = layerPreviewStyle(meta, style);
 
+    let shapeSelect = null;
+    if (Array.isArray(meta.shapes)) {
+      row.classList.add('has-shape');
+      shapeSelect = document.createElement('select');
+      shapeSelect.className = 'legend-shape';
+      shapeSelect.title = '轨迹点形状';
+      for (const item of meta.shapes) {
+        const option = document.createElement('option');
+        option.value = item.value;
+        option.textContent = item.label;
+        shapeSelect.appendChild(option);
+      }
+      shapeSelect.value = markerShape(style.shape);
+    }
+
     const range = document.createElement('label');
     range.className = 'legend-range';
     range.title = meta.type === 'line' ? '轨迹线宽度' : `${meta.name}大小`;
@@ -1962,13 +2219,19 @@ function buildLayerLegend() {
         : '颜色跟随上方数据集';
     }
 
-    row.append(eye, name, preview, range);
+    if (shapeSelect) row.append(eye, name, shapeSelect, preview, range);
+    else row.append(eye, name, preview, range);
     if (meta.colorSource !== 'dataset') row.insertBefore(color, name);
     dom.legendRows.appendChild(row);
 
     visible.addEventListener('change', () => {
       setLayerStyle(meta.key, { visible: visible.checked });
     });
+    if (shapeSelect) {
+      shapeSelect.addEventListener('change', () => {
+        setLayerStyle(meta.key, { shape: shapeSelect.value });
+      });
+    }
     if (meta.colorSource !== 'dataset') {
       color.addEventListener('input', () => {
         setLayerStyle(meta.key, { color: color.value });
@@ -1991,6 +2254,8 @@ function refreshLegendRow(layer) {
   row.querySelector('.legend-preview').style.cssText = layerPreviewStyle(meta, style);
   row.querySelector('.legend-range input').value = String(style.size);
   row.querySelector('.legend-value').textContent = formatLayerSize(style.size);
+  const shapeSelect = row.querySelector('.legend-shape');
+  if (shapeSelect && Array.isArray(meta.shapes)) shapeSelect.value = markerShape(style.shape);
 }
 
 function setLegendCollapsed(collapsed) {
@@ -2005,6 +2270,11 @@ function setLegendCollapsed(collapsed) {
 function applyLayerStyle(layer) {
   if (!state.mapReady || !state.datasets.length) return;
   const style = layerStyle(layer);
+  // 点标记由 canvas 覆盖层绘制，Plotly trace 始终隐藏
+  if (layer === 'track' || layer === 'start' || layer === 'end' || layer === 'current') {
+    scheduleMarkerDraw();
+    return;
+  }
   const indices = state.datasets.map((dataset, ordinal) => traceIndexFor(ordinal, layer));
   const visible = state.datasets.map((dataset) => {
     if (!style.visible || !dataset.visible) return false;
@@ -3089,6 +3359,8 @@ function syncTrackWindow() {
   } catch (error) {
     // 地图尚未就绪时忽略
   }
+  // 轨迹点 / 起点 / 终点由覆盖层绘制，窗口变化后要重画轨迹点
+  scheduleMarkerBase();
 }
 
 /**
@@ -4843,6 +5115,8 @@ function cacheDom() {
   dom.epochLabel = document.getElementById('epoch-label');
   dom.mapInfo = document.getElementById('map-info');
   dom.mapDragLabel = document.getElementById('map-drag-label');
+  dom.markerBaseOverlay = document.getElementById('marker-base-overlay');
+  dom.markerCurrentOverlay = document.getElementById('marker-current-overlay');
   dom.measureOverlay = document.getElementById('measure-overlay');
   dom.btnToolbox = document.getElementById('btn-toolbox');
   dom.toolboxPanel = document.getElementById('toolbox-panel');
@@ -5023,6 +5297,7 @@ function bindEvents() {
     resizePlots();
     positionToolbox();
     scheduleMeasureDraw();
+    scheduleMarkerDraw();
   });
   setupResizeObserver();
 

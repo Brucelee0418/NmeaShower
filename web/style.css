@@ -1221,6 +1221,15 @@ body.dragging::after {
 }
 
 /* ---------------- 地图上的距离测量 ---------------- */
+.marker-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 2;
+}
+
 .measure-overlay {
   position: absolute;
   inset: 0;
@@ -1306,6 +1315,23 @@ body.dragging::after {
 /* 跟随数据集配色的图层行少一列（无独立颜色控件） */
 .legend-row.follows-dataset {
   grid-template-columns: 14px minmax(44px, 1fr) 26px 76px;
+}
+
+/* 轨迹点行多一个形状下拉 */
+.legend-row.follows-dataset.has-shape {
+  grid-template-columns: 14px minmax(30px, 1fr) 58px 24px 72px;
+}
+
+.legend-shape {
+  width: 100%;
+  height: 19px;
+  padding: 0 1px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  background: #ffffff;
+  color: #475569;
+  font-size: 10px;
+  cursor: pointer;
 }
 
 /* chips 保持单行文字，不被压扁换行 */

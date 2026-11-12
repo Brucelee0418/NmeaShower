@@ -111,9 +111,9 @@ const GCJ02_SOURCES = new Set([
 /* ------------------------------------------------------------------ *
  * 地图图例 / 图层样式
  * ------------------------------------------------------------------ */
-// 每条轨迹固定 5 条 trace，按数据集序号 * 5 + 图层序号定位，
+// 每条轨迹固定 6 条 trace，按数据集序号 * 6 + 图层序号定位，
 // 这样数据集的增删不会打乱已有 trace 的下标。
-const LAYER_ORDER = ['line', 'track', 'start', 'end', 'current'];
+const LAYER_ORDER = ['line', 'track', 'start', 'end', 'current', 'offset'];
 const TRACES_PER_DATASET = LAYER_ORDER.length;
 
 function traceIndexFor(ordinal, layer) {
@@ -126,6 +126,8 @@ const MAP_LAYER_META = [
   { key: 'start', name: '起点', type: 'point', min: 6, max: 24, step: 1 },
   { key: 'end', name: '终点', type: 'point', min: 6, max: 24, step: 1 },
   { key: 'current', name: '当前位置', type: 'point', min: 6, max: 28, step: 1, colorSource: 'dataset' },
+  // 只有选了水平误差基准才出现在图例里
+  { key: 'offset', name: '基准连线', type: 'line', min: 0.5, max: 4, step: 0.5, colorSource: 'dataset' },
 ];
 
 const DEFAULT_LAYER_STYLE = {
@@ -134,6 +136,7 @@ const DEFAULT_LAYER_STYLE = {
   start: { color: '#16a34a', size: 10, visible: true },
   end: { color: '#dc2626', size: 10, visible: true },
   current: { color: '#f59e0b', size: 15, visible: true },
+  offset: { color: '#64748b', size: 1.5, visible: true },
 };
 
 const LAYER_STYLE_KEY = 'nmea.mapLayerStyle.v1';
@@ -908,8 +911,92 @@ function mapPointTrace(lons, lats, layer, name, dataset, covered = true) {
   };
 }
 
+const MAX_OFFSET_SEGMENTS = 90;
+
+/** 没有基准 / 没有覆盖时的占位几何：两个重合点画不出可见线，但 trace 数据形状保持稳定。 */
+function emptyOffsetGeometry(dataset) {
+  const display = displayTrack(dataset);
+  if (display.lat.length) {
+    return {
+      lon: [display.lon[0], display.lon[0], null],
+      lat: [display.lat[0], display.lat[0], null],
+    };
+  }
+  return { lon: [0, 0, null], lat: [0, 0, null] };
+}
+
 /**
- * 每个数据集固定输出 5 条 trace（线 / 点 / 起点 / 终点 / 当前位置），
+ * 「基准连线」的几何：时间窗内每个（抽稀后的）历元，从轨迹位置连到基准在
+ * 同一时刻的位置，直观看出水平偏移的方向和大小。窗口越窄抽稀越少。
+ */
+function offsetSegments(dataset) {
+  const lon = [];
+  const lat = [];
+  const reference = referenceDataset();
+  if (!reference || reference === dataset) return emptyOffsetGeometry(dataset);
+  const track = dataset.track;
+  if (!track.time.length) return emptyOffsetGeometry(dataset);
+
+  const display = displayTrack(dataset);
+  const offset = datasetOffset(dataset);
+  const first = lowerBound(track.time, state.window.start - offset - 1e-6);
+  const last = upperBound(track.time, state.window.end - offset + 1e-6);
+  const count = last - first;
+  if (count <= 0) return emptyOffsetGeometry(dataset);
+  const stride = Math.max(1, Math.ceil(count / MAX_OFFSET_SEGMENTS));
+
+  for (let i = first; i < last; i += stride) {
+    const globalSeconds = offset + track.time[i];
+    const position = referencePositionAt(reference, globalSeconds);
+    if (!position) continue;
+    const [refLat, refLon] = toDisplay(position.lat, position.lon);
+    if (refLat === null || refLon === null) continue;
+    lon.push(display.lon[i], refLon, null);
+    lat.push(display.lat[i], refLat, null);
+  }
+  return lon.length ? { lon, lat } : emptyOffsetGeometry(dataset);
+}
+
+function mapOffsetTrace(dataset) {
+  const style = layerStyle('offset');
+  const geometry = offsetSegments(dataset);
+  return {
+    type: 'scattermapbox',
+    mode: 'lines',
+    lon: geometry.lon,
+    lat: geometry.lat,
+    line: { color: dataset.color, width: style.size },
+    opacity: style.visible ? 0.7 : 0,
+    connectgaps: false,
+    // 图例里的显示 / 隐藏走 opacity，不改 visible：Plotly mapbox 对 trace
+    // 可见性做 restyle 后再删除数据集会留下失效图层。没有基准时几何是重合点，
+    // 画不出可见线。
+    visible: dataset.visible,
+    hoverinfo: 'skip',
+    name: `${dataset.name} 基准连线`,
+  };
+}
+
+/** 只刷新各数据集的「基准连线」几何，不重建整张地图（换基准时用）。 */
+function refreshOffsetTraces() {
+  if (!state.mapReady || !state.datasets.length) return;
+  const indices = [];
+  const lon = [];
+  const lat = [];
+  state.datasets.forEach((dataset, ordinal) => {
+    const geometry = offsetSegments(dataset);
+    indices.push(traceIndexFor(ordinal, 'offset'));
+    lon.push(geometry.lon);
+    lat.push(geometry.lat);
+  });
+  // 没有基准时几何是占位重合点，画不出可见线；这里不改 visible，
+  // 避免 Plotly 重建 Mapbox 图层后，删除数据集时报 "layer does not exist"。
+  const result = Plotly.restyle('map', { lon, lat }, indices);
+  if (result && typeof result.catch === 'function') result.catch(() => {});
+}
+
+/**
+ * 每个数据集固定输出 6 条 trace（线 / 点 / 起点 / 终点 / 当前位置 / 基准连线），
  * 隐藏的数据集只把 visible 置为 false，保证 trace 下标稳定。
  * 轨迹线与轨迹点只画当前时间窗内的那一段（按时间段显示）。
  */
@@ -942,6 +1029,7 @@ function mapData() {
       'end', '终点', dataset,
     ));
     traces.push(mapPointTrace(currentLons, currentLats, 'current', '当前位置', dataset, covered));
+    traces.push(mapOffsetTrace(dataset));
   }
   if (!traces.length) {
     // 占位 trace：没有数据时也让 mapbox 正常初始化
@@ -1540,7 +1628,10 @@ function refreshWindowChrome(dataset) {
 function buildLayerLegend() {
   if (!dom.legendRows) return;
   dom.legendRows.innerHTML = '';
+  const hasReference = Boolean(referenceDataset());
   for (const meta of MAP_LAYER_META) {
+    // 「基准连线」只有在选了基准之后才有意义
+    if (meta.key === 'offset' && !hasReference) continue;
     const style = layerStyle(meta.key);
     const row = document.createElement('div');
     row.className = 'legend-row';
@@ -1633,9 +1724,21 @@ function applyLayerStyle(layer) {
   if (!state.mapReady || !state.datasets.length) return;
   const style = layerStyle(layer);
   const indices = state.datasets.map((dataset, ordinal) => traceIndexFor(ordinal, layer));
-  const visible = state.datasets.map((dataset) => style.visible && dataset.visible
-    && (layer !== 'current' || datasetState(dataset) === 'ok'));
+  const visible = state.datasets.map((dataset) => {
+    if (!style.visible || !dataset.visible) return false;
+    if (layer === 'current') return datasetState(dataset) === 'ok';
+    return true;
+  });
 
+  if (layer === 'offset') {
+    // 用 opacity 控制显示 / 隐藏，保持 layer 存在（见 mapOffsetTrace 的说明）
+    Plotly.restyle('map', {
+      opacity: state.datasets.map((dataset) => (style.visible && dataset.visible ? 0.7 : 0)),
+      'line.width': style.size,
+      'line.color': state.datasets.map((dataset) => dataset.color),
+    }, indices);
+    return;
+  }
   if (layer === 'line') {
     Plotly.restyle('map', {
       visible,
@@ -2691,6 +2794,11 @@ function syncTrackWindow() {
       lon.push(visible.lon);
       lat.push(visible.lat);
     }
+    // 基准连线也只在时间窗内画，窗口变化时一起重算
+    const offset = offsetSegments(dataset);
+    indices.push(traceIndexFor(ordinal, 'offset'));
+    lon.push(offset.lon);
+    lat.push(offset.lat);
   });
   if (!indices.length) return;
   try {
@@ -3248,6 +3356,7 @@ function addDataset(text, name) {
   state.view = null;
   rebuildTimeline();
   buildDatasetLegend();
+  buildLayerLegend();
   buildCompareChips();
   updateMapInfo();
   updateControlState();
@@ -3299,6 +3408,7 @@ function removeDataset(id) {
     state.referenceId = null;
     state.view = null;
     buildDatasetLegend();
+    buildLayerLegend();
     updateMapInfo();
     updateControlState();
     dom.epochLabel.textContent = '未加载数据';
@@ -3316,6 +3426,7 @@ function removeDataset(id) {
 
   rebuildTimeline();
   buildDatasetLegend();
+  buildLayerLegend();
   updateMapInfo();
   renderMap(true);
   renderEpoch();
@@ -3874,8 +3985,13 @@ function toggleReference(dataset) {
 
   saveCompareConfig();
   buildDatasetLegend();
+  buildLayerLegend();
   buildCompareChips();
-  renderEpoch();
+  refreshOffsetTraces();
+  updateEpochLabel();
+  renderAllWindows();
+  updateDatasetLegendFocus();
+  renderCompareCursor();
   if (state.compare.open) renderCompare();
 }
 

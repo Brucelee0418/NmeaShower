@@ -671,6 +671,55 @@ main {
   padding-bottom: 2px;
 }
 
+/* 每条数据自己的线宽 / 点大小 / 点形状 */
+.dataset-style {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 1px 3px;
+}
+
+.ds-style {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex: 1;
+  min-width: 0;
+  font-size: 9.5px;
+  color: #94a3b8;
+}
+
+.ds-style input[type="range"] {
+  flex: 1;
+  min-width: 22px;
+  height: 12px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.ds-style b {
+  min-width: 15px;
+  text-align: right;
+  color: #64748b;
+  font-size: 9.5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.dataset-shape {
+  width: 56px;
+  height: 18px;
+  padding: 0 1px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  background: #ffffff;
+  color: #475569;
+  font-size: 9.5px;
+  cursor: pointer;
+}
+
 .dataset-row:hover { background: #f8fafc; }
 .dataset-row.focus { background: #eff6ff; }
 .dataset-row.off .dataset-name,
@@ -1317,21 +1366,15 @@ body.dragging::after {
   grid-template-columns: 14px minmax(44px, 1fr) 26px 76px;
 }
 
-/* 轨迹点行多一个形状下拉 */
-.legend-row.follows-dataset.has-shape {
-  grid-template-columns: 14px minmax(30px, 1fr) 58px 24px 72px;
+/* 轨迹线 / 轨迹点：每条数据单独设置，这里只留总开关 */
+.legend-row.per-dataset {
+  grid-template-columns: 14px minmax(44px, 1fr) auto;
 }
 
-.legend-shape {
-  width: 100%;
-  height: 19px;
-  padding: 0 1px;
-  border: 1px solid #cbd5e1;
-  border-radius: 4px;
-  background: #ffffff;
-  color: #475569;
-  font-size: 10px;
-  cursor: pointer;
+.legend-hint {
+  font-size: 9px;
+  color: #94a3b8;
+  white-space: nowrap;
 }
 
 /* chips 保持单行文字，不被压扁换行 */

@@ -923,7 +923,7 @@ function mapLineTrace(lons, lats, dataset) {
     mode: 'lines',
     lon: lons,
     lat: lats,
-    line: { color: dataset.color, width: style.size },
+    line: { color: dataset.color, width: datasetLineWidth(dataset) },
     visible: style.visible && dataset.visible,
     hoverinfo: 'skip',
     name: `${dataset.name} 轨迹线`,
@@ -1765,14 +1765,14 @@ function renderMarkerBase() {
   const trackStyle = layerStyle('track');
   const startStyle = layerStyle('start');
   const endStyle = layerStyle('end');
-  const shape = markerShape(trackStyle.shape);
 
   if (trackStyle.visible) {
     for (const dataset of state.datasets) {
       if (!dataset.visible) continue;
       const track = visibleTrack(dataset);
       if (!track.lat.length) continue;
-      const size = trackStyle.size;
+      const size = datasetPointSize(dataset);
+      const shape = datasetPointShape(dataset);
       const radius = size / 2;
       const path = new Path2D();
       for (let i = 0; i < track.lat.length; i += 1) {
@@ -1982,14 +1982,29 @@ function saveDatasetStyle() {
   }
 }
 
-/** 同名文件重新加载时沿用上次的颜色和显隐。 */
+/** 同名文件重新加载时沿用上次的颜色、显隐和每条数据的线 / 点样式。 */
 function datasetStyleFor(name, ordinal) {
   const saved = state.datasetStyle[name];
   const fallback = DATASET_PALETTE[ordinal % DATASET_PALETTE.length];
-  const style = { color: fallback, visible: true };
+  const lineStyle = state.layerStyle ? state.layerStyle.line : DEFAULT_LAYER_STYLE.line;
+  const trackStyle = state.layerStyle ? state.layerStyle.track : DEFAULT_LAYER_STYLE.track;
+  const style = {
+    color: fallback,
+    visible: true,
+    lineWidth: lineStyle.size,
+    pointSize: trackStyle.size,
+    pointShape: markerShape(trackStyle.shape),
+  };
   if (saved && typeof saved === 'object') {
     if (typeof saved.color === 'string' && /^#[0-9a-f]{6}$/i.test(saved.color)) style.color = saved.color;
     if (typeof saved.visible === 'boolean') style.visible = saved.visible;
+    const lineWidth = Number(saved.lineWidth);
+    if (Number.isFinite(lineWidth)) style.lineWidth = Math.min(8, Math.max(1, lineWidth));
+    const pointSize = Number(saved.pointSize);
+    if (Number.isFinite(pointSize)) style.pointSize = Math.min(12, Math.max(2, pointSize));
+    if (typeof saved.pointShape === 'string' && TRACK_SHAPE_VALUES.has(saved.pointShape)) {
+      style.pointShape = saved.pointShape;
+    }
   }
   // 同时存在的数据集不能同色（比如两份同名的日志）
   const used = new Set(state.datasets.map((dataset) => dataset.color));
@@ -2005,9 +2020,42 @@ function datasetStyleFor(name, ordinal) {
   return style;
 }
 
+function datasetLineWidth(dataset) {
+  const value = Number(dataset.lineWidth);
+  return Number.isFinite(value) ? Math.min(8, Math.max(1, value)) : DEFAULT_LAYER_STYLE.line.size;
+}
+
+function datasetPointSize(dataset) {
+  const value = Number(dataset.pointSize);
+  return Number.isFinite(value) ? Math.min(12, Math.max(2, value)) : DEFAULT_LAYER_STYLE.track.size;
+}
+
+function datasetPointShape(dataset) {
+  return markerShape(dataset.pointShape || DEFAULT_LAYER_STYLE.track.shape);
+}
+
 function rememberDatasetStyle(dataset) {
-  state.datasetStyle[dataset.name] = { color: dataset.color, visible: dataset.visible };
+  state.datasetStyle[dataset.name] = {
+    color: dataset.color,
+    visible: dataset.visible,
+    lineWidth: datasetLineWidth(dataset),
+    pointSize: datasetPointSize(dataset),
+    pointShape: datasetPointShape(dataset),
+  };
   saveDatasetStyle();
+}
+
+/** 只更新一条轨迹的线宽，不重建整张地图（拖动线宽滑杆时用）。 */
+function applyDatasetLineStyle(dataset) {
+  if (!state.mapReady) return;
+  const ordinal = datasetOrdinal(dataset);
+  if (ordinal < 0) return;
+  const style = layerStyle('line');
+  const result = Plotly.restyle('map', {
+    visible: style.visible && dataset.visible,
+    'line.width': datasetLineWidth(dataset),
+  }, [traceIndexFor(ordinal, 'line')]);
+  if (result && typeof result.catch === 'function') result.catch(() => {});
 }
 
 function buildDatasetLegend() {
@@ -2092,12 +2140,59 @@ function buildDatasetLegend() {
     base.addEventListener('click', () => toggleReference(dataset));
     tools.appendChild(base);
 
-    row.append(eye, color, name, count, remove, tools);
+    // 每条轨迹自己的线宽 / 点大小 / 点形状
+    const styleRow = document.createElement('div');
+    styleRow.className = 'dataset-style';
+
+    const lineWrap = document.createElement('label');
+    lineWrap.className = 'ds-style';
+    lineWrap.title = '轨迹线宽度（本条数据）';
+    const lineLabel = document.createElement('span');
+    lineLabel.textContent = '线';
+    const lineInput = document.createElement('input');
+    lineInput.type = 'range';
+    lineInput.min = '1';
+    lineInput.max = '8';
+    lineInput.step = '0.5';
+    lineInput.value = String(datasetLineWidth(dataset));
+    const lineValue = document.createElement('b');
+    lineValue.textContent = formatLayerSize(datasetLineWidth(dataset));
+    lineWrap.append(lineLabel, lineInput, lineValue);
+
+    const pointWrap = document.createElement('label');
+    pointWrap.className = 'ds-style';
+    pointWrap.title = '轨迹点大小（本条数据）';
+    const pointLabel = document.createElement('span');
+    pointLabel.textContent = '点';
+    const pointInput = document.createElement('input');
+    pointInput.type = 'range';
+    pointInput.min = '2';
+    pointInput.max = '12';
+    pointInput.step = '0.5';
+    pointInput.value = String(datasetPointSize(dataset));
+    const pointValue = document.createElement('b');
+    pointValue.textContent = formatLayerSize(datasetPointSize(dataset));
+    pointWrap.append(pointLabel, pointInput, pointValue);
+
+    const shapeSelect = document.createElement('select');
+    shapeSelect.className = 'dataset-shape';
+    shapeSelect.title = '轨迹点形状（本条数据）';
+    for (const item of TRACK_SHAPES) {
+      const option = document.createElement('option');
+      option.value = item.value;
+      option.textContent = item.label;
+      shapeSelect.appendChild(option);
+    }
+    shapeSelect.value = datasetPointShape(dataset);
+
+    styleRow.append(lineWrap, pointWrap, shapeSelect);
+
+    row.append(eye, color, name, count, remove, tools, styleRow);
     dom.legendDatasets.appendChild(row);
 
-    // 双击条目（不含勾选 / 颜色 / 关闭按钮）：时间窗对齐到这条数据自己的起止
+    // 双击条目（不含勾选 / 颜色 / 按钮 / 样式控件）：时间窗对齐到这条数据自己的起止
     row.addEventListener('dblclick', (event) => {
-      if (event.target.closest('input, label, .dataset-remove, .win-toggle')) return;
+      if (event.target.closest('input, label, select, .dataset-remove, .win-toggle, .dataset-style')) return;
       event.preventDefault();
       alignWindowToDataset(dataset);
     });
@@ -2123,6 +2218,23 @@ function buildDatasetLegend() {
       renderMap(true);
       buildCompareChips();
       renderCompare();
+    });
+    lineInput.addEventListener('input', () => {
+      dataset.lineWidth = Number(lineInput.value);
+      lineValue.textContent = formatLayerSize(datasetLineWidth(dataset));
+      rememberDatasetStyle(dataset);
+      applyDatasetLineStyle(dataset);
+    });
+    pointInput.addEventListener('input', () => {
+      dataset.pointSize = Number(pointInput.value);
+      pointValue.textContent = formatLayerSize(datasetPointSize(dataset));
+      rememberDatasetStyle(dataset);
+      scheduleMarkerBase();
+    });
+    shapeSelect.addEventListener('change', () => {
+      dataset.pointShape = markerShape(shapeSelect.value);
+      rememberDatasetStyle(dataset);
+      scheduleMarkerBase();
     });
     name.addEventListener('click', () => setFocus(dataset.id));
     remove.addEventListener('click', () => removeDataset(dataset.id));
@@ -2178,28 +2290,30 @@ function buildLayerLegend() {
     name.className = 'legend-name';
     name.textContent = meta.name;
 
+    // 轨迹线 / 轨迹点的宽度、大小、形状在每条数据的图例行里单独设置，
+    // 这里只保留一个总开关，避免和下面的「每条数据单独」控件重复。
+    if (meta.key === 'line' || meta.key === 'track') {
+      row.classList.add('per-dataset');
+      const hint = document.createElement('span');
+      hint.className = 'legend-hint';
+      hint.textContent = '每条数据单独';
+      row.append(eye, name, hint);
+      dom.legendRows.appendChild(row);
+      visible.addEventListener('change', () => {
+        setLayerStyle(meta.key, { visible: visible.checked });
+      });
+      continue;
+    }
+
     const preview = document.createElement('span');
     preview.className = `legend-preview ${meta.type}`;
     preview.style.cssText = layerPreviewStyle(meta, style);
 
-    let shapeSelect = null;
-    if (Array.isArray(meta.shapes)) {
-      row.classList.add('has-shape');
-      shapeSelect = document.createElement('select');
-      shapeSelect.className = 'legend-shape';
-      shapeSelect.title = '轨迹点形状';
-      for (const item of meta.shapes) {
-        const option = document.createElement('option');
-        option.value = item.value;
-        option.textContent = item.label;
-        shapeSelect.appendChild(option);
-      }
-      shapeSelect.value = markerShape(style.shape);
-    }
-
     const range = document.createElement('label');
     range.className = 'legend-range';
-    range.title = meta.type === 'line' ? '轨迹线宽度' : `${meta.name}大小`;
+    range.title = meta.key === 'offset'
+      ? '基准连线宽度'
+      : meta.type === 'line' ? '轨迹线宽度' : `${meta.name}大小`;
     const slider = document.createElement('input');
     slider.type = 'range';
     slider.min = String(meta.min);
@@ -2219,19 +2333,13 @@ function buildLayerLegend() {
         : '颜色跟随上方数据集';
     }
 
-    if (shapeSelect) row.append(eye, name, shapeSelect, preview, range);
-    else row.append(eye, name, preview, range);
+    row.append(eye, name, preview, range);
     if (meta.colorSource !== 'dataset') row.insertBefore(color, name);
     dom.legendRows.appendChild(row);
 
     visible.addEventListener('change', () => {
       setLayerStyle(meta.key, { visible: visible.checked });
     });
-    if (shapeSelect) {
-      shapeSelect.addEventListener('change', () => {
-        setLayerStyle(meta.key, { shape: shapeSelect.value });
-      });
-    }
     if (meta.colorSource !== 'dataset') {
       color.addEventListener('input', () => {
         setLayerStyle(meta.key, { color: color.value });
@@ -2250,12 +2358,11 @@ function refreshLegendRow(layer) {
   if (!meta || !row) return;
   const style = layerStyle(layer);
   row.classList.toggle('off', !style.visible);
+  if (meta.key === 'line' || meta.key === 'track') return;
   if (meta.colorSource !== 'dataset') row.querySelector('.legend-color').value = style.color;
   row.querySelector('.legend-preview').style.cssText = layerPreviewStyle(meta, style);
   row.querySelector('.legend-range input').value = String(style.size);
   row.querySelector('.legend-value').textContent = formatLayerSize(style.size);
-  const shapeSelect = row.querySelector('.legend-shape');
-  if (shapeSelect && Array.isArray(meta.shapes)) shapeSelect.value = markerShape(style.shape);
 }
 
 function setLegendCollapsed(collapsed) {
@@ -2270,17 +2377,17 @@ function setLegendCollapsed(collapsed) {
 function applyLayerStyle(layer) {
   if (!state.mapReady || !state.datasets.length) return;
   const style = layerStyle(layer);
-  // 点标记由 canvas 覆盖层绘制，Plotly trace 始终隐藏
-  if (layer === 'track' || layer === 'start' || layer === 'end' || layer === 'current') {
+  // 轨迹点 / 起点 / 终点 / 当前位置由 canvas 覆盖层绘制，Plotly trace 始终隐藏
+  if (layer === 'track') {
+    scheduleMarkerBase();
+    return;
+  }
+  if (layer === 'start' || layer === 'end' || layer === 'current') {
     scheduleMarkerDraw();
     return;
   }
   const indices = state.datasets.map((dataset, ordinal) => traceIndexFor(ordinal, layer));
-  const visible = state.datasets.map((dataset) => {
-    if (!style.visible || !dataset.visible) return false;
-    if (layer === 'current') return datasetState(dataset) === 'ok';
-    return true;
-  });
+  const visible = state.datasets.map((dataset) => style.visible && dataset.visible);
 
   if (layer === 'offset') {
     // 用 opacity 控制显示 / 隐藏，保持 layer 存在（见 mapOffsetTrace 的说明）
@@ -2294,20 +2401,10 @@ function applyLayerStyle(layer) {
   if (layer === 'line') {
     Plotly.restyle('map', {
       visible,
-      'line.width': style.size,
+      'line.width': state.datasets.map((dataset) => datasetLineWidth(dataset)),
       'line.color': state.datasets.map((dataset) => dataset.color),
     }, indices);
-    return;
   }
-  if (layer === 'start' || layer === 'end') {
-    Plotly.restyle('map', { visible, 'marker.size': style.size, 'marker.color': style.color }, indices);
-    return;
-  }
-  Plotly.restyle('map', {
-    visible,
-    'marker.size': style.size,
-    'marker.color': state.datasets.map((dataset) => dataset.color),
-  }, indices);
 }
 
 function scheduleLayerStyle(layer) {
@@ -3883,6 +3980,9 @@ function addDataset(text, name) {
     name,
     color: style.color,
     visible: style.visible,
+    lineWidth: style.lineWidth,
+    pointSize: style.pointSize,
+    pointShape: style.pointShape,
     epochs: parsed.epochs,
     stats: parsed.stats,
     summary,

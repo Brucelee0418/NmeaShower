@@ -127,7 +127,7 @@ const MAP_LAYER_META = [
   { key: 'end', name: '终点', type: 'point', min: 6, max: 24, step: 1 },
   { key: 'current', name: '当前位置', type: 'point', min: 6, max: 28, step: 1, colorSource: 'dataset' },
   // 只有选了水平误差基准才出现在图例里
-  { key: 'offset', name: '基准连线', type: 'line', min: 0.5, max: 4, step: 0.5, colorSource: 'dataset' },
+  { key: 'offset', name: '基准连线', type: 'line', min: 1, max: 6, step: 0.5, colorSource: 'dataset' },
 ];
 
 const DEFAULT_LAYER_STYLE = {
@@ -136,7 +136,7 @@ const DEFAULT_LAYER_STYLE = {
   start: { color: '#16a34a', size: 10, visible: true },
   end: { color: '#dc2626', size: 10, visible: true },
   current: { color: '#f59e0b', size: 15, visible: true },
-  offset: { color: '#64748b', size: 1.5, visible: true },
+  offset: { color: '#64748b', size: 2.5, visible: true },
 };
 
 const LAYER_STYLE_KEY = 'nmea.mapLayerStyle.v1';
@@ -911,7 +911,7 @@ function mapPointTrace(lons, lats, layer, name, dataset, covered = true) {
   };
 }
 
-const MAX_OFFSET_SEGMENTS = 90;
+const MAX_OFFSET_SEGMENTS = 5000;
 
 /** 没有基准 / 没有覆盖时的占位几何：两个重合点画不出可见线，但 trace 数据形状保持稳定。 */
 function emptyOffsetGeometry(dataset) {
@@ -966,7 +966,7 @@ function mapOffsetTrace(dataset) {
     lon: geometry.lon,
     lat: geometry.lat,
     line: { color: dataset.color, width: style.size },
-    opacity: style.visible ? 0.7 : 0,
+    opacity: style.visible ? 0.9 : 0,
     connectgaps: false,
     // 图例里的显示 / 隐藏走 opacity，不改 visible：Plotly mapbox 对 trace
     // 可见性做 restyle 后再删除数据集会留下失效图层。没有基准时几何是重合点，
@@ -1404,6 +1404,10 @@ function loadLayerStyle() {
       }
       const size = Number(value.size);
       if (Number.isFinite(size)) target.size = Math.min(meta.max, Math.max(meta.min, size));
+      // 旧版「基准连线」默认 1.5 px 太细，升级后统一换成新默认
+      if (meta.key === 'offset' && target.size === 1.5) {
+        target.size = DEFAULT_LAYER_STYLE.offset.size;
+      }
       if (typeof value.visible === 'boolean') target.visible = value.visible;
     }
   } catch (error) {
@@ -1733,7 +1737,7 @@ function applyLayerStyle(layer) {
   if (layer === 'offset') {
     // 用 opacity 控制显示 / 隐藏，保持 layer 存在（见 mapOffsetTrace 的说明）
     Plotly.restyle('map', {
-      opacity: state.datasets.map((dataset) => (style.visible && dataset.visible ? 0.7 : 0)),
+      opacity: state.datasets.map((dataset) => (style.visible && dataset.visible ? 0.9 : 0)),
       'line.width': style.size,
       'line.color': state.datasets.map((dataset) => dataset.color),
     }, indices);

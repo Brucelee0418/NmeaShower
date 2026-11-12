@@ -2162,6 +2162,7 @@ function lockCurrentPosition() {
   }
   if (addLock(info)) toast('已锁定当前位置');
   else toast('当前位置已经锁定');
+  hideTrackHover();
 }
 
 /** 轨迹点下标 → 历元下标（轨迹数组只保留有定位的历元）。 */
@@ -2882,6 +2883,7 @@ function buildDatasetLegend() {
       rememberDatasetStyle(dataset);
       row.classList.toggle('off', !dataset.visible);
       renderMap(true);
+      hideTrackHover();
       scheduleLockPosition();
       updateMapInfo();
       buildCompareChips();
@@ -3055,6 +3057,7 @@ function applyLayerStyle(layer) {
   const style = layerStyle(layer);
   // 轨迹点 / 起点 / 终点 / 当前位置由 canvas 覆盖层绘制，Plotly trace 始终隐藏
   if (layer === 'track') {
+    if (!style.visible) hideTrackHover();
     scheduleMarkerBase();
     scheduleLegendWindow();
     return;
@@ -4113,6 +4116,7 @@ function scheduleWindowApply() {
  */
 function syncTrackWindow() {
   if (!state.mapReady || !state.datasets.length) return;
+  hideTrackHover();
   const indices = [];
   const lon = [];
   const lat = [];
@@ -6018,6 +6022,7 @@ function bindEvents() {
   dom.mapStyle.addEventListener('change', () => {
     state.mapSource = dom.mapStyle.value;
     state.mapReady = false;
+    hideTrackHover();
     // 直接改 raster layer 会撞上 mapbox 的 "Style is not done loading"，
     // 因此先拆掉地图容器，再在下一帧重建
     Plotly.purge('map');

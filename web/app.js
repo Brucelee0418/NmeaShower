@@ -2120,19 +2120,12 @@ function scheduleLockPosition() {
 }
 
 function updateLockButton() {
-  if (dom.btnLock) {
-    const count = state.locks.length;
-    dom.btnLock.title = count
-      ? `锁定当前位置的轨迹点（已锁定 ${count} 个）`
-      : '锁定当前位置的轨迹点';
-    dom.btnLock.classList.toggle('has-locks', count > 0);
-  }
-  if (dom.btnUnlock) {
-    dom.btnUnlock.disabled = state.locks.length === 0;
-    dom.btnUnlock.title = state.locks.length
-      ? `取消全部 ${state.locks.length} 个锁定标记`
-      : '当前没有锁定标记';
-  }
+  if (!dom.btnUnlock) return;
+  const count = state.locks.length;
+  dom.btnUnlock.disabled = count === 0;
+  dom.btnUnlock.title = count
+    ? `取消全部 ${count} 个锁定标记`
+    : '当前没有锁定标记';
 }
 
 function renderLockCards() {
@@ -2187,30 +2180,6 @@ function clearLocks() {
   hideTrackHover();
   renderLockCards();
   toast('已取消全部锁定标记');
-}
-
-function lockCurrentPosition() {
-  const dataset = focusDataset();
-  if (!dataset) {
-    toast('请先加载 NMEA 文件', true);
-    return;
-  }
-  if (!dataset.visible) {
-    toast('当前数据已隐藏，先在地图图例里显示它', true);
-    return;
-  }
-  if (datasetState(dataset) !== 'ok') {
-    toast('当前位置不在该数据的时间范围内', true);
-    return;
-  }
-  const info = lockInfoFor(dataset, dataset.index);
-  if (!info) {
-    toast('当前位置没有有效定位', true);
-    return;
-  }
-  if (addLock(info)) toast('已锁定当前位置');
-  else toast('当前位置已经锁定');
-  hideTrackHover();
 }
 
 /** 轨迹点下标 → 历元下标（轨迹数组只保留有定位的历元）。 */
@@ -6038,7 +6007,6 @@ function cacheDom() {
   dom.mapLockLayer = document.getElementById('map-lock-layer');
   dom.mapLockList = document.getElementById('map-lock-list');
   dom.mapTrackHover = document.getElementById('map-track-hover');
-  dom.btnLock = document.getElementById('btn-lock');
   dom.measureOverlay = document.getElementById('measure-overlay');
   dom.btnMeasure = document.getElementById('btn-measure');
   dom.measureWindow = document.getElementById('measure-window');
@@ -6202,9 +6170,6 @@ function bindEvents() {
   }
   if (dom.measureWindow) {
     attachWindowDrag(dom.measureWindow, dom.measureWindowHead, rememberMeasurePos);
-  }
-  if (dom.btnLock) {
-    dom.btnLock.addEventListener('click', lockCurrentPosition);
   }
   if (dom.btnUnlock) {
     dom.btnUnlock.addEventListener('click', clearLocks);

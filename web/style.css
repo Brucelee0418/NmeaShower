@@ -1633,11 +1633,6 @@ body.dragging::after {
   color: #ffffff;
 }
 
-#btn-lock.has-locks {
-  border-color: #f59e0b;
-  color: #fbbf24;
-}
-
 /* 跟随数据集配色的图层行少一列（无独立颜色控件） */
 .legend-row.follows-dataset {
   grid-template-columns: 14px minmax(44px, 1fr) 26px 76px;

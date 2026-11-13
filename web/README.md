@@ -16,6 +16,11 @@ cd web
 npm start
 ```
 
+也可以不敲命令：
+
+- **Windows**：双击 [`start.cmd`](start.cmd)，会启动服务器并自动打开浏览器；
+- **macOS / Linux**：执行 `./start.sh`。
+
 然后打开终端里显示的地址，默认：
 
 ```text
@@ -106,6 +111,8 @@ web/
 ├── style.css
 ├── server.mjs              # 零依赖静态服务器 + 瓦片代理
 ├── package.json
+├── start.cmd               # Windows 双击启动
+├── start.sh                # macOS / Linux 启动
 ├── nmea.log                # 示例日志
 ├── sky_split.json          # 可选的遮挡分割数据
 ├── vendor/plotly.min.js    # 本地 Plotly
@@ -120,6 +127,17 @@ web/
 - 地图瓦片缓存在 `.cache/tiles/`，可以随时删除。
 
 ## 常见问题
+
+**页面能直接双击 `index.html` 打开吗？**
+
+不能获得完整功能。`file://` 下浏览器会阻止页面 `fetch` 本地日志、`sky_split.json` 和地图瓦片，所以页面会提示改用本地服务器。
+
+如果不想每次开终端：
+
+- Windows 双击 [`start.cmd`](start.cmd)；
+- macOS / Linux 执行 `./start.sh`。
+
+它们会启动本项目的 `server.mjs`，并自动打开 `http://127.0.0.1:8000/`。
 
 **端口被占用？**
 

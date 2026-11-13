@@ -7108,7 +7108,7 @@ function init() {
 
   if (location.protocol === 'file:') {
     toast('当前以 file:// 打开，浏览器会阻止读取本地文件与地图瓦片；'
-      + '请用 npm start 启动本项目自带的服务器后访问终端里显示的地址。', true);
+      + '请用 npm start 启动本项目自带的服务器（Windows 可双击 start.cmd）后访问终端里显示的地址。', true);
     return;
   }
 

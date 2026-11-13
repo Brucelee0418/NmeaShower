@@ -41,6 +41,13 @@ cd web
 npm start
 ```
 
+如果不想每次开终端：
+
+- **Windows**：双击 `web/start.cmd`；
+- **macOS / Linux**：执行 `cd web && ./start.sh`。
+
+脚本会启动本地服务器并自动打开浏览器。
+
 终端会显示地址，默认：
 
 ```text
@@ -78,7 +85,7 @@ node server.mjs --host 0.0.0.0 --port 8000
 - 顶栏：`图例`、`定位结果对比`、`卫星对比`、`测距`、`取消锁定`；
 - 顶栏「打开 NMEA 文件」支持一次追加多条数据；图例样式浮窗里可逐条改色、隐藏、移除。
 
-> 必须通过 `http://` 打开页面，不能直接双击 `index.html` 用 `file://`，否则浏览器会阻止读取示例日志和地图瓦片。
+> 必须通过 `http://` 打开页面。直接双击 `index.html`（`file://`）时，浏览器会阻止读取示例日志和地图瓦片；Windows 可双击 `web/start.cmd`，macOS / Linux 执行 `web/start.sh`，效果相当于启动本地服务器并自动打开浏览器。
 
 ### 停止
 
@@ -205,6 +212,8 @@ Copy-Item python\out\sky_split.json web\sky_split.json
 │   ├── style.css
 │   ├── server.mjs
 │   ├── package.json
+│   ├── start.cmd           # Windows 双击启动
+│   ├── start.sh            # macOS / Linux 启动
 │   ├── nmea.log
 │   ├── sky_split.json      # 可选演示数据
 │   ├── vendor/
@@ -249,7 +258,7 @@ HTTPS_PROXY=http://127.0.0.1:1080 npm run start:proxy
 ```
 
 **Q: 页面能否直接用 `file://` 打开？**
-不建议：浏览器会阻止日志和瓦片请求。请通过 `server.mjs` 或任意静态服务器打开。
+不能获得完整功能：浏览器会阻止页面读取本地日志、`sky_split.json` 和地图瓦片。要“像双击应用一样”打开，Windows 双击 `web/start.cmd`，macOS / Linux 执行 `web/start.sh`；它们会启动本地服务器并自动打开浏览器。
 
 **Q: 只做解析，需要装依赖吗？**
 不需要。`analyze_nmea.py` 和 `nmea_parser.py` 只用标准库；只有天空分割 / 报告需要 `requirements.txt` 里的包。

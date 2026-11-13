@@ -218,6 +218,15 @@ const SAT_BAND_ORDER = [
   'L1', 'L2', 'L5', 'G1', 'G2', 'E1', 'E5a', 'E5b', 'E5', 'E6',
   'B1I', 'B1C', 'B1Q', 'B2I', 'B2a', 'B2b', 'B3I', 'B3Q', '默认',
 ];
+// 每个系统内部按常见频点排序；颜色 = 系统基色 + 频点深浅，换选频点后颜色仍稳定。
+const SAT_SYSTEM_BAND_ORDER = {
+  GPS: ['L1', 'L5', 'L2'],
+  QZSS: ['L1', 'L5', 'L2', 'L6'],
+  GLONASS: ['G1', 'G2', 'G3'],
+  Galileo: ['E1', 'E5a', 'E5b', 'E5', 'E6'],
+  BeiDou: ['B1I', 'B1C', 'B2a', 'B1Q', 'B2I', 'B2b', 'B3I', 'B3Q'],
+  NavIC: ['L5', 'S'],
+};
 const SAT_MARKER_SYMBOLS = ['circle', 'square', 'diamond', 'triangle-up', 'cross', 'x'];
 const SAT_DEFAULT_WIDTH = 640;
 const SAT_DEFAULT_HEIGHT = 500;
@@ -6110,10 +6119,13 @@ function mixHexColor(hex, amount) {
   return `rgb(${channel(16)}, ${channel(8)}, ${channel(0)})`;
 }
 
-function satelliteCurveColor(system, band, bands) {
+function satelliteCurveColor(system, band) {
   const base = SYSTEM_COLORS[system] || '#64748b';
-  const index = Math.max(0, bands.indexOf(band));
-  const adjustments = [0, 0.24, -0.18, 0.4, -0.32, 0.52];
+  const systemOrder = SAT_SYSTEM_BAND_ORDER[system] || [];
+  let index = systemOrder.indexOf(band);
+  if (index < 0) index = SAT_BAND_ORDER.indexOf(band);
+  if (index < 0) index = 0;
+  const adjustments = [0, 0.26, -0.22, 0.46, -0.34, 0.6, -0.48, 0.72];
   return mixHexColor(base, adjustments[index % adjustments.length]);
 }
 
@@ -6550,7 +6562,7 @@ function satelliteFigure(metric, datasets, systems, bands) {
           const series = satelliteBandSeries(dataset, system, band, metric);
           if (!series.present) continue;
           if (!series.y.some((value) => value !== null)) continue;
-          const color = satelliteCurveColor(system, band, bands);
+          const color = satelliteCurveColor(system, band);
           data.push({
             type: 'scatter',
             mode: 'lines+markers',

@@ -218,7 +218,7 @@ const SAT_BAND_ORDER = [
   'L1', 'L2', 'L5', 'G1', 'G2', 'E1', 'E5a', 'E5b', 'E5', 'E6',
   'B1I', 'B1C', 'B1Q', 'B2I', 'B2a', 'B2b', 'B3I', 'B3Q', '默认',
 ];
-const SAT_DATASET_DASH = ['solid', '2px,5px'];
+const SAT_MARKER_SYMBOLS = ['circle', 'square', 'diamond', 'triangle-up', 'cross', 'x'];
 const SAT_DEFAULT_WIDTH = 640;
 const SAT_DEFAULT_HEIGHT = 500;
 const SAT_MIN_WIDTH = 380;
@@ -6117,12 +6117,12 @@ function satelliteCurveColor(system, band, bands) {
   return mixHexColor(base, adjustments[index % adjustments.length]);
 }
 
-/** 数据集只用实线 / 点线；数据更多时加粗，避免回到虚线。 */
+/** 所有曲线用实线 + 数据点；多数据集用点形状区分，完全不用虚线。 */
 function satelliteDatasetStyle(index) {
-  const dotted = index % SAT_DATASET_DASH.length === 1;
   return {
-    dash: SAT_DATASET_DASH[index % SAT_DATASET_DASH.length],
-    width: (dotted ? 2 : 1.5) + Math.floor(index / SAT_DATASET_DASH.length) * 0.7,
+    width: 1.5 + Math.floor(index / SAT_MARKER_SYMBOLS.length) * 0.6,
+    symbol: SAT_MARKER_SYMBOLS[index % SAT_MARKER_SYMBOLS.length],
+    size: index === 0 ? 3.5 : 4.5,
   };
 }
 
@@ -6147,9 +6147,14 @@ function syncSatelliteLegendMargin() {
     element.clientWidth,
     element.clientHeight,
   );
-  if (Math.abs((element._fullLayout.margin.t || 0) - legendLayout.marginTop) < 0.5) return;
+  const legend = element._fullLayout.legend;
+  const actualHeight = legend && Number.isFinite(legend._height) ? legend._height : 0;
+  const desired = Math.max(28, actualHeight ? actualHeight + 10 : legendLayout.marginTop);
+  const maxTop = Math.max(28, element.clientHeight - 140 - 28);
+  const marginTop = Math.min(desired, maxTop);
+  if (Math.abs((element._fullLayout.margin.t || 0) - marginTop) < 0.5) return;
   try {
-    const result = Plotly.relayout(element, { 'margin.t': legendLayout.marginTop });
+    const result = Plotly.relayout(element, { 'margin.t': marginTop });
     if (result && typeof result.catch === 'function') result.catch(() => {});
   } catch (error) {
     // 浮窗正在关闭 / 重排时忽略
@@ -6160,13 +6165,17 @@ function syncSatelliteLegendMargin() {
 function ensureSatellitePlotHeight() {
   if (!state.sat.open || !state.satReady || !dom.satWindow || !dom.satPlot) return;
   const layout = dom.satPlot._fullLayout;
-  if (!layout || !layout._size) return;
+  if (!layout) return;
   const minPlotHeight = 200;
-  if (layout._size.h >= minPlotHeight) return;
+  const legendHeight = layout.legend && Number.isFinite(layout.legend._height)
+    ? layout.legend._height : 0;
+  const required = legendHeight + 10 + minPlotHeight + 28;
+  const deficit = required - dom.satPlot.clientHeight;
+  if (deficit <= 0) return;
 
   const rect = dom.satWindow.getBoundingClientRect();
   const maxHeight = Math.max(SAT_MIN_HEIGHT, window.innerHeight - 20);
-  const nextHeight = Math.min(rect.height + (minPlotHeight - layout._size.h) + 32, maxHeight);
+  const nextHeight = Math.min(rect.height + deficit + 8, maxHeight);
   if (nextHeight <= rect.height + 2) return;
 
   const nextTop = Math.max(4, Math.min(rect.top, window.innerHeight - nextHeight - 4));
@@ -6507,18 +6516,25 @@ function satelliteFigure(metric, datasets, systems, bands) {
       system: parts.system,
       signal: parts.signal === 'default' ? '' : parts.signal,
     });
-    for (const dataset of datasets) {
+    for (let datasetIndex = 0; datasetIndex < datasets.length; datasetIndex += 1) {
+      const dataset = datasets[datasetIndex];
+      const style = satelliteDatasetStyle(datasetIndex);
       const series = satelliteSingleSeries(dataset, state.sat.satellite);
       if (!series.y.some((value) => value !== null)) continue;
       data.push({
         type: 'scatter',
-        mode: 'lines',
+        mode: 'lines+markers',
         x: series.x,
         y: series.y,
         customdata: series.t,
         name: `${dataset.name} · ${parts.system} · ${band}`,
         meta: { datasetId: dataset.id, system: parts.system, band, metric },
         line: { color: dataset.color, width: 1.6, dash: 'solid' },
+        marker: {
+          color: dataset.color,
+          size: style.size,
+          symbol: style.symbol,
+        },
         connectgaps: false,
         hovertemplate: `${escapeHtml(dataset.name)} · ${parts.system} · ${band}<br>%{y:.1f} dB-Hz<extra></extra>`,
       });
@@ -6534,25 +6550,25 @@ function satelliteFigure(metric, datasets, systems, bands) {
           const series = satelliteBandSeries(dataset, system, band, metric);
           if (!series.present) continue;
           if (!series.y.some((value) => value !== null)) continue;
-          const style = datasets.length > 1
-            ? datasetStyle
-            : {
-              dash: bandIndex % 2 === 0 ? 'solid' : SAT_DATASET_DASH[1],
-              width: bandIndex % 2 === 0 ? 1.5 : 2,
-            };
+          const color = satelliteCurveColor(system, band, bands);
           data.push({
             type: 'scatter',
-            mode: 'lines',
+            mode: 'lines+markers',
             x: series.x,
             y: series.y,
             customdata: series.t,
             name: `${dataset.name} · ${system} · ${band}`,
             meta: { datasetId: dataset.id, system, band, metric },
             line: {
-              color: satelliteCurveColor(system, band, bands),
-              width: style.width,
-              dash: style.dash,
+              color,
+              width: datasetStyle.width,
+              dash: 'solid',
               shape: metric === 'counts' ? 'hv' : 'linear',
+            },
+            marker: {
+              color,
+              size: datasetStyle.size,
+              symbol: datasetStyle.symbol,
             },
             connectgaps: false,
             hovertemplate: metric === 'counts'
@@ -6583,8 +6599,6 @@ function satelliteFigure(metric, datasets, systems, bands) {
       yanchor: 'bottom',
       font: { size: data.length > 18 ? 7 : 8, color: '#475569' },
       bgcolor: 'rgba(0,0,0,0)',
-      entrywidth: 150,
-      entrywidthmode: 'pixels',
     },
     hovermode: 'x unified',
     dragmode: 'pan',
@@ -6656,7 +6670,10 @@ function renderSatellite() {
   Plotly.react(dom.satPlot, figure.data, figure.layout, PLOT_CONFIG);
   state.satReady = true;
   bindSatelliteClick();
-  window.requestAnimationFrame(() => ensureSatellitePlotHeight());
+  window.requestAnimationFrame(() => {
+    syncSatelliteLegendMargin();
+    ensureSatellitePlotHeight();
+  });
 }
 
 function renderSatelliteCursor() {

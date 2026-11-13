@@ -22,20 +22,31 @@ npm start
 http://127.0.0.1:8000/
 ```
 
-不需要 `npm install`，也没有前端构建步骤。也可以直接：
-
-```bash
-node server.mjs
-node server.mjs --port 9000
-node server.mjs --host 0.0.0.0 --port 8000
-node server.mjs --open
-```
+不需要 `npm install`，也没有前端构建步骤。
 
 示例数据已经放在本项目根目录：
 
 ```text
 http://127.0.0.1:8000/?file=nmea.log
 ```
+
+### 第一次使用（3 步）
+
+1. 在终端进入 `web/`，运行 `npm start`；
+2. 浏览器打开终端显示的地址；
+3. 直接访问 `/?file=nmea.log` 看示例，或点「打开 NMEA 文件」选自己的日志。
+
+停止服务器：在启动终端按 `Ctrl+C`。
+
+常用启动参数：
+
+```bash
+npm start -- --port 9000       # 换端口
+node server.mjs --open         # 启动并尝试打开浏览器
+node server.mjs --host 0.0.0.0 --port 8000
+```
+
+页面默认不加载数据；自己的 `.log` / `.nmea` / `.txt` 放到 `web/` 根目录就能用 `?file=文件名` 访问，也可以直接在页面里选择本地文件。
 
 ## 功能
 
@@ -107,3 +118,31 @@ web/
 - `server.mjs` 只负责静态文件与瓦片代理，不做 NMEA 解析；
 - NMEA 解析、状态、Plotly 绘图和交互全部在 `app.js`；
 - 地图瓦片缓存在 `.cache/tiles/`，可以随时删除。
+
+## 常见问题
+
+**端口被占用？**
+
+```bash
+npm start -- --port 9000
+# 或
+node server.mjs --port 9000
+```
+
+**页面能直接双击 `index.html` 打开吗？**
+
+不要。`file://` 会阻止日志读取和地图瓦片；必须通过 `server.mjs`（或其它静态服务器）访问 `http://`。
+
+**地图空白 / 底图不显示？**
+
+ArcGIS、高德一般可直连；Google / OSM 在部分网络需要代理。Node 24+：
+
+```bash
+HTTPS_PROXY=http://127.0.0.1:1080 npm run start:proxy
+```
+
+瓦片失败只影响底图，轨迹、星空图、仪表盘和对比功能仍然可用。
+
+**需要 `npm install` 吗？**
+
+不需要。项目没有 npm 依赖；`npm start` 只是在执行 `node server.mjs`。

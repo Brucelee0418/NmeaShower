@@ -5706,7 +5706,7 @@ function compareFigure(metrics, datasets) {
       const series = compareSeries(dataset, key);
       data.push({
         type: 'scatter',
-        mode: 'lines',
+        mode: 'lines+markers',
         x: series.x,
         y: series.y,
         xaxis: k === 0 ? 'x' : `x${k + 1}`,
@@ -5715,7 +5715,8 @@ function compareFigure(metrics, datasets) {
         meta: { datasetId: dataset.id, metric: key },
         // 图例只在第一个子图生成，否则同名数据集会重复出现
         showlegend: k === 0,
-        line: { color: dataset.color, width: 1.6 },
+        line: { color: dataset.color, width: 1.6, dash: 'solid' },
+        marker: { color: dataset.color, size: 2.8, symbol: 'circle' },
         connectgaps: false,
         hovertemplate: absoluteDateAxis
           ? `${dataset.name}　%{y:.2f} ${meta.unit}<extra></extra>`

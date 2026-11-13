@@ -205,6 +205,10 @@ const SAT_SYSTEM_DASH = {
   GPS: 'solid', BeiDou: 'dash', GLONASS: 'dot', Galileo: 'dashdot',
   QZSS: 'longdash', NavIC: 'longdashdot', MULTI: 'solid',
 };
+const SAT_DEFAULT_WIDTH = 640;
+const SAT_DEFAULT_HEIGHT = 460;
+const SAT_MIN_WIDTH = 380;
+const SAT_MIN_HEIGHT = 280;
 
 /* ------------------------------------------------------------------ *
  * 星空图 / 仪表盘浮窗
@@ -5414,6 +5418,10 @@ function loadSatelliteConfig() {
         && Number.isFinite(Number(saved.rect.x))
         && Number.isFinite(Number(saved.rect.y))) {
       state.sat.rect = { x: Number(saved.rect.x), y: Number(saved.rect.y) };
+      if (Number.isFinite(Number(saved.rect.w)) && Number.isFinite(Number(saved.rect.h))) {
+        state.sat.rect.w = Number(saved.rect.w);
+        state.sat.rect.h = Number(saved.rect.h);
+      }
     }
   } catch (error) {
     // 配置损坏时用默认值
@@ -6421,11 +6429,13 @@ function renderSatelliteCursor() {
 function placeSatelliteWindow() {
   const element = dom.satWindow;
   if (!element) return;
-  const width = Math.max(320, Math.min(640, window.innerWidth - 24));
-  const height = Math.max(300, Math.min(460, window.innerHeight - 100));
+  const saved = state.sat.rect;
+  const maxWidth = Math.max(SAT_MIN_WIDTH, window.innerWidth - 24);
+  const maxHeight = Math.max(SAT_MIN_HEIGHT, window.innerHeight - 100);
+  const width = Math.min(maxWidth, Math.max(SAT_MIN_WIDTH, (saved && saved.w) || SAT_DEFAULT_WIDTH));
+  const height = Math.min(maxHeight, Math.max(SAT_MIN_HEIGHT, (saved && saved.h) || SAT_DEFAULT_HEIGHT));
   element.style.width = `${width}px`;
   element.style.height = `${height}px`;
-  const saved = state.sat.rect;
   if (saved) {
     const left = Math.max(0, Math.min(window.innerWidth - width, saved.x));
     const top = Math.max(0, Math.min(window.innerHeight - height, saved.y));
@@ -6463,8 +6473,53 @@ function placeSatelliteWindow() {
 function rememberSatelliteRect() {
   if (!dom.satWindow) return;
   const rect = dom.satWindow.getBoundingClientRect();
-  state.sat.rect = { x: Math.round(rect.left), y: Math.round(rect.top) };
+  state.sat.rect = {
+    x: Math.round(rect.left),
+    y: Math.round(rect.top),
+    w: Math.round(rect.width),
+    h: Math.round(rect.height),
+  };
   saveSatelliteConfig();
+}
+
+/** 拖右下角调整卫星对比窗口大小；尺寸写入 localStorage。 */
+function attachSatelliteResize() {
+  const element = dom.satWindow;
+  const handle = element && element.querySelector('.float-resize');
+  if (!handle || handle.__resizeBound) return;
+  handle.__resizeBound = true;
+  handle.addEventListener('pointerdown', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = element.getBoundingClientRect();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const startWidth = rect.width;
+    const startHeight = rect.height;
+
+    const onMove = (moveEvent) => {
+      const width = Math.max(SAT_MIN_WIDTH, Math.min(
+        window.innerWidth - rect.left - 4,
+        startWidth + moveEvent.clientX - startX,
+      ));
+      const height = Math.max(SAT_MIN_HEIGHT, Math.min(
+        window.innerHeight - rect.top - 4,
+        startHeight + moveEvent.clientY - startY,
+      ));
+      element.style.width = `${width}px`;
+      element.style.height = `${height}px`;
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      rememberSatelliteRect();
+      if (state.satReady) {
+        try { Plotly.Plots.resize('sat-plot'); } catch (error) { /* 忽略 */ }
+      }
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  });
 }
 
 function setSatelliteOpen(open) {
@@ -6724,6 +6779,7 @@ function bindEvents() {
   }
   if (dom.satWindow) {
     attachWindowDrag(dom.satWindow, dom.satHead, rememberSatelliteRect);
+    attachSatelliteResize();
     dom.satWindow.addEventListener('pointerdown', () => bringToFront(dom.satWindow));
   }
 

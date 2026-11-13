@@ -1564,6 +1564,13 @@ body.dragging::after {
   font-variant-numeric: tabular-nums;
 }
 
+.map-lock-hint {
+  margin-top: 3px;
+  color: #94a3b8;
+  font-size: 9px;
+  letter-spacing: 0.02em;
+}
+
 .map-lock-actions {
   display: flex;
   justify-content: flex-end;

@@ -5,6 +5,7 @@ nmea.log -text
 # 文本文件统一 LF
 *.py text eol=lf
 *.js text eol=lf
+*.mjs text eol=lf
 *.css text eol=lf
 *.html text eol=lf
 *.md text eol=lf

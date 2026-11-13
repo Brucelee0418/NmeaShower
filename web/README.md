@@ -9,7 +9,7 @@
 
 ## 快速开始
 
-要求 Node.js 18+（建议 20+）。
+要求 Node.js 18+；Google / OSM 的自动代理模式需要 Node.js 24+。
 
 ```bash
 cd web
@@ -79,7 +79,16 @@ node server.mjs --host 0.0.0.0 --port 8000
 `server.mjs` 会把地图瓦片代理到 `/tiles/:source/:z/:x/:y` 并缓存到 `.cache/tiles/`，解决浏览器 CORS 和 ArcGIS 瓦片坐标顺序问题。
 
 - ArcGIS / 高德默认直连；
-- Google / OSM 在部分网络环境需要代理。Node 24+ 可以这样启动：
+- Google / OSM 在部分网络环境需要代理；
+- 启动时会自动检测 `HTTPS_PROXY` / `HTTP_PROXY`，Windows 下还会读取系统代理（含 PAC）；检测到后自动以代理模式重启（需要 Node.js 24+），Google / OSM 瓦片即可正常加载；
+- 也可以显式指定：
+
+```bash
+node server.mjs --proxy http://127.0.0.1:1080
+node server.mjs --no-proxy
+```
+
+`npm run start:proxy` 仍然可用，适合已经在环境变量里配置好代理的 shell：
 
 ```bash
 HTTPS_PROXY=http://127.0.0.1:1080 npm run start:proxy

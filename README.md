@@ -30,7 +30,7 @@ NMEA 0183 日志的解析、统计、机器学习与可视化工具集。仓库�
 
 ### 环境
 
-- Node.js 18+，建议 20+；
+- Node.js 18+，建议 20+；Google / OSM 的自动代理模式需要 Node.js 24+；
 - 不需要 `npm install`，不需要构建；
 - Plotly 已内置在 `web/vendor/`。
 
@@ -250,11 +250,11 @@ npm start
 `npm start -- --port 9000`，或 `node server.mjs --port 9000`。
 
 **Q: 页面打开后地图是空白的？**
-地图底图需要网络。ArcGIS / 高德默认可用；Google / OSM 在部分网络需要代理：
+地图底图需要网络。ArcGIS / 高德默认可用；Google / OSM 在部分网络需要代理。`web/server.mjs` 启动时会自动检测 `HTTPS_PROXY` / `HTTP_PROXY` 和 Windows 系统代理（含 PAC）（需要 Node.js 24+），检测到后会以代理模式重启，直接双击 `start.cmd` 也可以。也可以显式指定：
 
 ```bash
 cd web
-HTTPS_PROXY=http://127.0.0.1:1080 npm run start:proxy
+node server.mjs --proxy http://127.0.0.1:1080
 ```
 
 **Q: 页面能否直接用 `file://` 打开？**

@@ -150,30 +150,6 @@ body {
 .step-select:hover:not(:disabled) { border-color: #475569; background-color: #1e293b; }
 .step-select:disabled { opacity: 0.45; cursor: not-allowed; }
 
-.rate-group {
-  display: flex;
-  border: 1px solid #334155;
-  border-radius: 6px;
-  overflow: hidden;
-}
-
-.rate {
-  appearance: none;
-  border: 0;
-  background: transparent;
-  color: #94a3b8;
-  font-size: 12px;
-  padding: 4px 11px;
-  cursor: pointer;
-  font-variant-numeric: tabular-nums;
-  transition: background 0.15s, color 0.15s;
-}
-
-.rate + .rate { border-left: 1px solid #334155; }
-.rate:hover:not(:disabled) { background: #24314a; color: #e2e8f0; }
-.rate.active { background: #38bdf8; color: #0b1220; font-weight: 600; }
-.rate:disabled { opacity: 0.4; cursor: not-allowed; }
-
 /* ---------------- 进度条 × 时间窗（合二为一） ---------------- */
 /* 整条轨道 = 全部时间：高亮段 = 时间窗，橙色游标 = 当前时刻，窗内亮色 = 已播放进度 */
 .timeline {

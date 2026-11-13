@@ -54,12 +54,12 @@
 
   <div class="transport">
     <button id="btn-back" class="button icon" type="button" disabled title="按当前步长后退（←）">◀ 1s</button>
-    <button id="btn-play" class="button icon play" type="button" disabled title="播放 / 暂停（空格）">▶ 播放</button>
+    <button id="btn-play" class="button icon play" type="button" disabled title="播放 / 暂停（按步进速度）">▶ 播放</button>
     <button id="btn-fwd" class="button icon" type="button" disabled title="按当前步长前进（→）">1s ▶</button>
 
-    <label class="step-control" title="快进 / 后退步长">
+    <label class="step-control" title="播放速度 / 快进 / 后退步长">
       <span>步进</span>
-      <select id="step-size" class="step-select" aria-label="快进 / 后退步长" disabled>
+      <select id="step-size" class="step-select" aria-label="播放速度 / 快进 / 后退步长" disabled>
         <option value="1">1s</option>
         <option value="5">5s</option>
         <option value="60">1min</option>
@@ -67,11 +67,6 @@
         <option value="600">10min</option>
       </select>
     </label>
-
-    <div class="rate-group" role="group" aria-label="播放倍速">
-      <button id="rate-1" class="rate active" type="button" data-rate="1" disabled>1×</button>
-      <button id="rate-2" class="rate" type="button" data-rate="2" disabled>2×</button>
-    </div>
 
     <!-- 进度条与时间窗条合二为一：同一条轨道既定位当前时刻，也调整时间窗 -->
     <div id="timeline" class="timeline">

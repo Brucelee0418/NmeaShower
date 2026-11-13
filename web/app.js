@@ -720,8 +720,7 @@ const state = {
   origin: 0,          // 轨道 0 点对应的绝对秒
   duration: 0,        // 全部数据集覆盖的时间跨度
   playing: false,
-  rate: 1,            // 播放倍速
-  stepSeconds: 1,     // 快进 / 后退步长（秒）
+  stepSeconds: 1,     // 播放速度 / 快进 / 后退步长（秒）
   playAnchorWall: 0,  // 播放起点的墙钟时间
   playAnchorTime: 0,  // 播放起点的数据时间
   rafHandle: null,
@@ -4517,7 +4516,7 @@ function resizePlots() {
 }
 
 /* ------------------------------------------------------------------ *
- * 播放控制（按真实时间推进，1× = 1 秒数据用 1 秒播放）
+ * 播放控制（按「步进」速度推进，1s = 1 秒数据用 1 秒播放）
  * ------------------------------------------------------------------ */
 function stopPlayback() {
   state.playing = false;
@@ -4531,7 +4530,7 @@ function stopPlayback() {
 function playbackFrame(now) {
   if (!state.playing) return;
   const elapsed = (now - state.playAnchorWall) / 1000;
-  const target = state.playAnchorTime + elapsed * state.rate;
+  const target = state.playAnchorTime + elapsed * state.stepSeconds;
   // 播放上限是时间窗右标尺，而不是全局末尾
   const limit = state.origin + state.window.end;
 
@@ -4569,18 +4568,6 @@ function togglePlayback() {
   state.rafHandle = requestAnimationFrame(playbackFrame);
 }
 
-function setRate(rate) {
-  state.rate = rate;
-  // 变速时重新锚定，避免已播放的时间被重复换算
-  if (state.playing) {
-    state.playAnchorWall = performance.now();
-    state.playAnchorTime = state.now;
-  }
-  for (const button of dom.rateButtons) {
-    button.classList.toggle('active', Number(button.dataset.rate) === rate);
-  }
-}
-
 /** 按秒跳转：delta 为秒数（正负），限制在时间窗内。 */
 function stepTime(delta) {
   if (!state.datasets.length) return;
@@ -4596,12 +4583,20 @@ function stepLabel(seconds) {
   return `${seconds}s`;
 }
 
-/** 设置快进 / 后退步长，并同步按钮文字与下拉框。 */
+/** 设置播放速度 / 快进 / 后退步长，并同步按钮文字与下拉框。 */
 function setStepSeconds(seconds) {
   const value = STEP_OPTIONS.includes(Number(seconds)) ? Number(seconds) : 1;
   state.stepSeconds = value;
+  // 播放中变速时重新锚定，避免已播放的时间被重复换算
+  if (state.playing) {
+    state.playAnchorWall = performance.now();
+    state.playAnchorTime = state.now;
+  }
   const label = stepLabel(value);
-  if (dom.stepSize) dom.stepSize.value = String(value);
+  if (dom.stepSize) {
+    dom.stepSize.value = String(value);
+    dom.stepSize.title = `播放速度 / 快进 / 后退步长：${label}`;
+  }
   if (dom.btnBack) {
     dom.btnBack.textContent = `◀ ${label}`;
     dom.btnBack.title = `按当前步长后退（←）：${label}`;
@@ -4729,7 +4724,6 @@ function updateControlState() {
   dom.btnBack.disabled = !enabled;
   dom.btnFwd.disabled = !enabled;
   if (dom.stepSize) dom.stepSize.disabled = !enabled;
-  for (const button of dom.rateButtons) button.disabled = !enabled;
 }
 
 /** 只切换图例行的 focus 高亮，不重建整个图例（避免丢失滑块状态）。 */
@@ -6777,7 +6771,6 @@ function cacheDom() {
   dom.btnBack = document.getElementById('btn-back');
   dom.btnFwd = document.getElementById('btn-fwd');
   dom.stepSize = document.getElementById('step-size');
-  dom.rateButtons = Array.from(document.querySelectorAll('.rate'));
   dom.timeNow = document.getElementById('time-now');
   dom.timeTotal = document.getElementById('time-total');
   dom.timelineTrack = document.getElementById('timeline-track');
@@ -6915,13 +6908,6 @@ function bindEvents() {
   if (dom.legendWindows) {
     dom.legendWindows.addEventListener('click', () => {
       setAllWindows(openWindowCount() === 0);
-    });
-  }
-
-  for (const button of dom.rateButtons) {
-    button.addEventListener('click', () => {
-      if (button.disabled) return;
-      setRate(Number(button.dataset.rate) || 1);
     });
   }
 

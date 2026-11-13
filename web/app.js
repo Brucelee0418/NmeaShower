@@ -201,12 +201,32 @@ const SAT_METRICS = {
   one: { name: '单星 CN0', unit: 'dB-Hz', digits: 1 },
 };
 const SAT_SYSTEM_ORDER = ['GPS', 'BeiDou', 'GLONASS', 'Galileo', 'QZSS', 'NavIC', 'MULTI'];
-const SAT_SYSTEM_DASH = {
-  GPS: 'solid', BeiDou: 'dash', GLONASS: 'dot', Galileo: 'dashdot',
-  QZSS: 'longdash', NavIC: 'longdashdot', MULTI: 'solid',
+// NMEA 4.10 GSV 的 signalId → 常见频点名称；未识别的保留原始编号
+const SIGNAL_BANDS = {
+  GPS: { 1: 'L1', 2: 'L1', 3: 'L2', 4: 'L2', 5: 'L5', 6: 'L1', 7: 'L2', 8: 'L5' },
+  GLONASS: { 1: 'G1', 2: 'G1', 3: 'G2', 4: 'G2' },
+  Galileo: { 1: 'E5a', 2: 'E5b', 3: 'E5', 4: 'E6', 5: 'E1', 6: 'E5', 7: 'E1', 8: 'E5' },
+  BeiDou: {
+    1: 'B1I', 2: 'B1Q', 3: 'B1C', 4: 'B2I', 5: 'B2a',
+    6: 'B3I', 7: 'B3Q', 8: 'B2b',
+  },
+  QZSS: { 1: 'L1', 2: 'L1', 3: 'L2', 4: 'L5', 5: 'L6', 6: 'L1', 7: 'L2', 8: 'L5' },
+  NavIC: { 1: 'L5', 2: 'S' },
 };
+const SAT_BAND_DASH = {
+  L1: 'solid', L2: 'dot', L5: 'dash',
+  G1: 'solid', G2: 'dot',
+  E1: 'solid', E5a: 'dash', E5b: 'dot', E5: 'dashdot', E6: 'dashdot',
+  B1I: 'solid', B1C: 'dash', B1Q: 'dashdot', B2I: 'dot', B2a: 'dashdot',
+  B2b: 'dashdot', B3I: 'longdash', B3Q: 'longdashdot',
+  '默认': 'solid',
+};
+const SAT_BAND_ORDER = [
+  'L1', 'L2', 'L5', 'G1', 'G2', 'E1', 'E5a', 'E5b', 'E5', 'E6',
+  'B1I', 'B1C', 'B1Q', 'B2I', 'B2a', 'B2b', 'B3I', 'B3Q', '默认',
+];
 const SAT_DEFAULT_WIDTH = 640;
-const SAT_DEFAULT_HEIGHT = 460;
+const SAT_DEFAULT_HEIGHT = 500;
 const SAT_MIN_WIDTH = 380;
 const SAT_MIN_HEIGHT = 280;
 
@@ -403,6 +423,7 @@ function createEpoch(date, time) {
     pdop: null,
     vdop: null,
     satellites: new Map(),
+    signals: new Map(),
     types: new Set(),
   };
 }
@@ -478,12 +499,16 @@ function applySentence(epoch, sentence) {
     if (vdop !== null) epoch.vdop = vdop;
   } else if (kind === 'GSV') {
     const system = systemOf(sentence.talker);
+    // NMEA 4.10 在最后追加 signalId；老版本没有这一列
+    const hasSignal = (f.length - 3) % 4 === 1;
+    const signal = hasSignal ? (f[f.length - 1] || '').trim() : '';
     for (let i = 3; i + 3 < f.length; i += 4) {
       const prn = (f[i] || '').trim();
       if (!prn) continue;
       const satellite = {
         system,
         prn,
+        signal,
         elevation: parseNumber(f[i + 1]),
         azimuth: parseNumber(f[i + 2]),
         cn0: parseNumber(f[i + 3]),
@@ -492,6 +517,11 @@ function applySentence(epoch, sentence) {
       const previous = epoch.satellites.get(key);
       if (!previous || satelliteScore(satellite) >= satelliteScore(previous)) {
         epoch.satellites.set(key, satellite);
+      }
+      const signalKey = `${system}|${prn}|${signal || 'default'}`;
+      const previousSignal = epoch.signals.get(signalKey);
+      if (!previousSignal || satelliteScore(satellite) >= satelliteScore(previousSignal)) {
+        epoch.signals.set(signalKey, satellite);
       }
     }
   }
@@ -730,9 +760,10 @@ const state = {
     open: false,
     metric: 'counts',
     systems: null,   // null = 当前数据里的全部系统
+    bands: null,     // null = 当前数据里的全部频点
     datasets: null,  // null = 当前全部数据集
-    satellite: null, // 单星模式：`系统|prn`
-    rect: null,      // 拖动后的位置 { x, y }
+    satellite: null, // 单星模式：`系统|prn|signal`
+    rect: null,      // 位置和尺寸 { x, y, w, h }
   },
   satReady: false,
   // 时间窗：全局相对秒。start/end 是「时间先后」上的两个标尺，窗口内即为活动区间
@@ -5412,6 +5443,7 @@ function loadSatelliteConfig() {
     const saved = JSON.parse(localStorage.getItem(SAT_KEY) || 'null');
     if (saved && SAT_METRICS[saved.metric]) state.sat.metric = saved.metric;
     if (saved && Array.isArray(saved.systems)) state.sat.systems = saved.systems.slice();
+    if (saved && Array.isArray(saved.bands)) state.sat.bands = saved.bands.slice();
     if (saved && Array.isArray(saved.datasets)) state.sat.datasets = saved.datasets.slice();
     if (saved && typeof saved.satellite === 'string') state.sat.satellite = saved.satellite;
     if (saved && saved.rect
@@ -5433,6 +5465,7 @@ function saveSatelliteConfig() {
     localStorage.setItem(SAT_KEY, JSON.stringify({
       metric: state.sat.metric,
       systems: state.sat.systems,
+      bands: state.sat.bands,
       datasets: state.sat.datasets,
       satellite: state.sat.satellite,
       rect: state.sat.rect,
@@ -6057,6 +6090,49 @@ function satelliteSelectedSystems() {
   return new Set(state.sat.systems.filter((system) => present.includes(system)));
 }
 
+/** 卫星信号频点：NMEA 4.10 的 signalId 映射为 L1/L5/B1I 等，没有 signalId 时归为「默认」。 */
+function satelliteBandOf(satellite) {
+  const signal = satellite && satellite.signal ? String(satellite.signal) : '';
+  if (!signal) return '默认';
+  const map = SIGNAL_BANDS[satellite.system];
+  const numeric = Number(signal);
+  const key = Number.isFinite(numeric) ? String(numeric) : signal;
+  return (map && map[key]) || `频点 ${signal}`;
+}
+
+function satelliteSignalKey(satellite) {
+  return `${satellite.system}|${satellite.prn}|${satellite.signal || 'default'}`;
+}
+
+/** 同一历元下优先用带 signalId 的 GSV；老数据回退到 satellites。 */
+function satelliteSignalEntries(epoch) {
+  if (!epoch) return [];
+  if (epoch.signals && epoch.signals.size) return [...epoch.signals.values()];
+  return [...epoch.satellites.values()];
+}
+
+function satelliteBandList() {
+  const present = new Set();
+  for (const dataset of state.datasets) {
+    for (const epoch of dataset.epochs) {
+      for (const satellite of satelliteSignalEntries(epoch)) {
+        present.add(satelliteBandOf(satellite));
+      }
+    }
+  }
+  return [...present].sort((a, b) => {
+    const ai = SAT_BAND_ORDER.indexOf(a);
+    const bi = SAT_BAND_ORDER.indexOf(b);
+    return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi) || a.localeCompare(b);
+  });
+}
+
+function satelliteSelectedBands() {
+  const present = satelliteBandList();
+  if (state.sat.bands === null) return new Set(present);
+  return new Set(state.sat.bands.filter((band) => present.includes(band)));
+}
+
 function satelliteSelectedDatasets() {
   if (state.sat.datasets === null) return new Set(state.datasets.map((dataset) => dataset.id));
   const present = new Set(state.datasets.map((dataset) => dataset.id));
@@ -6080,92 +6156,116 @@ function satelliteWindowRange() {
   ];
 }
 
-function satelliteCountSeries(dataset, system) {
+function satelliteBandSeries(dataset, system, band, metric) {
   const x = [];
   const y = [];
+  const t = [];
+  let present = false;
   const offset = datasetOffset(dataset);
   for (let i = 0; i < dataset.epochs.length; i += 1) {
     if (!Number.isFinite(dataset.times[i])) continue;
     const epoch = dataset.epochs[i];
     let count = 0;
-    if (epoch) {
-      for (const satellite of epoch.satellites.values()) {
-        if (satellite.system === system) count += 1;
-      }
-    }
-    x.push(satelliteAxisValue(offset + dataset.times[i]));
-    y.push(count);
-  }
-  return { x, y };
-}
-
-function satelliteCn0Series(dataset, system) {
-  const x = [];
-  const y = [];
-  const offset = datasetOffset(dataset);
-  for (let i = 0; i < dataset.epochs.length; i += 1) {
-    if (!Number.isFinite(dataset.times[i])) continue;
-    const epoch = dataset.epochs[i];
     let sum = 0;
-    let count = 0;
+    let cn0Count = 0;
     if (epoch) {
-      for (const satellite of epoch.satellites.values()) {
-        if (satellite.system === system && satellite.cn0 !== null && satellite.cn0 > 0) {
+      // 同一颗卫星在一个频点上可能有多个 signalId，按 prn 去重，CN0 取最好值
+      const perPrn = new Map();
+      for (const satellite of satelliteSignalEntries(epoch)) {
+        if (satellite.system !== system || satelliteBandOf(satellite) !== band) continue;
+        present = true;
+        const previous = perPrn.get(satellite.prn);
+        if (!previous || (satellite.cn0 || 0) > (previous.cn0 || 0)) {
+          perPrn.set(satellite.prn, satellite);
+        }
+      }
+      count = perPrn.size;
+      for (const satellite of perPrn.values()) {
+        if (satellite.cn0 !== null && satellite.cn0 > 0) {
           sum += satellite.cn0;
-          count += 1;
+          cn0Count += 1;
         }
       }
     }
-    x.push(satelliteAxisValue(offset + dataset.times[i]));
-    y.push(count ? sum / count : null);
+    const relative = offset + dataset.times[i];
+    x.push(satelliteAxisValue(relative));
+    y.push(metric === 'counts' ? count : (cn0Count ? sum / cn0Count : null));
+    t.push(relative);
   }
-  return { x, y };
+  return { x, y, t, present };
 }
 
 function satelliteSingleSeries(dataset, key) {
   const x = [];
   const y = [];
+  const t = [];
   const offset = datasetOffset(dataset);
+  const parts = splitSatelliteKey(key);
   for (let i = 0; i < dataset.epochs.length; i += 1) {
     if (!Number.isFinite(dataset.times[i])) continue;
     const epoch = dataset.epochs[i];
-    const satellite = epoch ? epoch.satellites.get(key) : null;
-    x.push(satelliteAxisValue(offset + dataset.times[i]));
+    let satellite = null;
+    if (epoch) {
+      if (epoch.signals && epoch.signals.size) satellite = epoch.signals.get(key);
+      else if (parts && parts.signal === 'default') {
+        satellite = epoch.satellites.get(`${parts.system}|${parts.prn}`);
+      }
+    }
+    const relative = offset + dataset.times[i];
+    x.push(satelliteAxisValue(relative));
     y.push(satellite && satellite.cn0 !== null && satellite.cn0 > 0 ? satellite.cn0 : null);
+    t.push(relative);
   }
-  return { x, y };
+  return { x, y, t };
 }
 
 function splitSatelliteKey(key) {
-  const index = String(key || '').indexOf('|');
-  if (index < 0) return null;
-  return { system: key.slice(0, index), prn: key.slice(index + 1) };
+  const parts = String(key || '').split('|');
+  if (parts.length < 2) return null;
+  return {
+    system: parts[0],
+    prn: parts[1],
+    signal: parts.slice(2).join('|') || 'default',
+  };
 }
 
-/** 单星下拉里可选的卫星：只保留选中系统里的卫星，按系统和 prn 排序。 */
-function satelliteOptionList(systems) {
+/** 单星下拉：按选中的系统 / 频点筛选，信号级去重。 */
+function satelliteOptionList(systems, bands) {
   const entries = new Map();
   const selectedIds = satelliteSelectedDatasets();
   for (const dataset of state.datasets) {
     if (!selectedIds.has(dataset.id)) continue;
     for (const epoch of dataset.epochs) {
-      for (const satellite of epoch.satellites.values()) {
+      for (const satellite of satelliteSignalEntries(epoch)) {
         if (!systems.has(satellite.system)) continue;
-        const key = `${satellite.system}|${satellite.prn}`;
+        const band = satelliteBandOf(satellite);
+        if (!bands.has(band)) continue;
+        const key = satelliteSignalKey(satellite);
         let entry = entries.get(key);
         if (!entry) {
-          entry = { key, system: satellite.system, prn: satellite.prn, cn0Count: 0 };
+          entry = {
+            key,
+            system: satellite.system,
+            prn: satellite.prn,
+            band,
+            cn0Count: 0,
+          };
           entries.set(key, entry);
         }
         if (satellite.cn0 !== null && satellite.cn0 > 0) entry.cn0Count += 1;
       }
     }
   }
-  const order = (system) => {
+  const systemOrder = (system) => {
     const index = SAT_SYSTEM_ORDER.indexOf(system);
     return index < 0 ? 99 : index;
   };
-  return [...entries.values()].sort((a, b) => order(a.system) - order(b.system)
+  const bandOrder = (band) => {
+    const index = SAT_BAND_ORDER.indexOf(band);
+    return index < 0 ? 99 : index;
+  };
+  return [...entries.values()].sort((a, b) => systemOrder(a.system) - systemOrder(b.system)
+    || bandOrder(a.band) - bandOrder(b.band)
     || (Number(a.prn) || 0) - (Number(b.prn) || 0)
     || String(a.prn).localeCompare(String(b.prn)));
 }
@@ -6223,6 +6323,36 @@ function buildSatelliteChips() {
     }
   }
 
+  if (dom.satBands) {
+    dom.satBands.innerHTML = '';
+    const bands = satelliteBandList();
+    if (!bands.length) {
+      const empty = document.createElement('span');
+      empty.className = 'compare-empty';
+      empty.textContent = '暂无频点';
+      dom.satBands.appendChild(empty);
+    }
+    const selected = satelliteSelectedBands();
+    for (const band of bands) {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'chip';
+      chip.textContent = band;
+      chip.title = `卫星信号频点 ${band}`;
+      chip.classList.toggle('off', !selected.has(band));
+      chip.addEventListener('click', () => {
+        const current = satelliteSelectedBands();
+        if (current.has(band)) current.delete(band);
+        else current.add(band);
+        state.sat.bands = [...current];
+        saveSatelliteConfig();
+        buildSatelliteChips();
+        renderSatellite();
+      });
+      dom.satBands.appendChild(chip);
+    }
+  }
+
   if (dom.satDatasets) {
     dom.satDatasets.innerHTML = '';
     if (!state.datasets.length) {
@@ -6257,7 +6387,8 @@ function buildSatelliteChips() {
   if (dom.satSatelliteRow) dom.satSatelliteRow.hidden = state.sat.metric !== 'one';
   if (dom.satSatellite && state.sat.metric === 'one') {
     const selectedSystems = satelliteSelectedSystems();
-    const options = satelliteOptionList(selectedSystems);
+    const selectedBands = satelliteSelectedBands();
+    const options = satelliteOptionList(selectedSystems, selectedBands);
     let current = state.sat.satellite;
     if (!options.some((option) => option.key === current)) {
       const preferred = options.find((option) => option.cn0Count > 0) || options[0];
@@ -6277,7 +6408,7 @@ function buildSatelliteChips() {
       for (const item of options) {
         const option = document.createElement('option');
         option.value = item.key;
-        option.textContent = `${SYSTEM_PREFIX[item.system] || ''}${item.prn} · ${item.system}`;
+        option.textContent = `${SYSTEM_PREFIX[item.system] || ''}${item.prn} · ${item.system} · ${item.band}`;
         option.selected = item.key === current;
         dom.satSatellite.appendChild(option);
       }
@@ -6285,12 +6416,16 @@ function buildSatelliteChips() {
   }
 }
 
-function satelliteFigure(metric, datasets, systems) {
+function satelliteFigure(metric, datasets, systems, bands) {
   const data = [];
   const meta = SAT_METRICS[metric];
   if (metric === 'one') {
     const parts = splitSatelliteKey(state.sat.satellite);
     if (!parts) return { data, layout: compareEmptyLayout('选择一颗卫星') };
+    const band = satelliteBandOf({
+      system: parts.system,
+      signal: parts.signal === 'default' ? '' : parts.signal,
+    });
     for (const dataset of datasets) {
       const series = satelliteSingleSeries(dataset, state.sat.satellite);
       if (!series.y.some((value) => value !== null)) continue;
@@ -6299,39 +6434,42 @@ function satelliteFigure(metric, datasets, systems) {
         mode: 'lines',
         x: series.x,
         y: series.y,
-        name: dataset.name,
-        meta: { datasetId: dataset.id, metric },
+        customdata: series.t,
+        name: `${dataset.name} · ${parts.system} · ${band}`,
+        meta: { datasetId: dataset.id, system: parts.system, band, metric },
         line: { color: dataset.color, width: 1.6 },
         connectgaps: false,
-        hovertemplate: `${escapeHtml(dataset.name)}<br>%{y:.1f} dB-Hz<extra></extra>`,
+        hovertemplate: `${escapeHtml(dataset.name)} · ${parts.system} · ${band}<br>%{y:.1f} dB-Hz<extra></extra>`,
       });
     }
   } else {
     for (const dataset of datasets) {
       for (const system of systems) {
         if (!dataset.summary || !(system in dataset.summary.systems)) continue;
-        const series = metric === 'counts'
-          ? satelliteCountSeries(dataset, system)
-          : satelliteCn0Series(dataset, system);
-        if (!series.y.some((value) => value !== null)) continue;
-        data.push({
-          type: 'scatter',
-          mode: 'lines',
-          x: series.x,
-          y: series.y,
-          name: `${dataset.name} · ${system}`,
-          meta: { datasetId: dataset.id, system, metric },
-          line: {
-            color: dataset.color,
-            width: 1.5,
-            dash: SAT_SYSTEM_DASH[system] || 'solid',
-            shape: metric === 'counts' ? 'hv' : 'linear',
-          },
-          connectgaps: false,
-          hovertemplate: metric === 'counts'
-            ? `${escapeHtml(dataset.name)} · ${system}<br>%{y:.0f} 颗<extra></extra>`
-            : `${escapeHtml(dataset.name)} · ${system}<br>%{y:.1f} dB-Hz<extra></extra>`,
-        });
+        for (const band of bands) {
+          const series = satelliteBandSeries(dataset, system, band, metric);
+          if (!series.present) continue;
+          if (!series.y.some((value) => value !== null)) continue;
+          data.push({
+            type: 'scatter',
+            mode: 'lines',
+            x: series.x,
+            y: series.y,
+            customdata: series.t,
+            name: `${dataset.name} · ${system} · ${band}`,
+            meta: { datasetId: dataset.id, system, band, metric },
+            line: {
+              color: dataset.color,
+              width: 1.5,
+              dash: SAT_BAND_DASH[band] || 'solid',
+              shape: metric === 'counts' ? 'hv' : 'linear',
+            },
+            connectgaps: false,
+            hovertemplate: metric === 'counts'
+              ? `${escapeHtml(dataset.name)} · ${system} · ${band}<br>%{y:.0f} 颗<extra></extra>`
+              : `${escapeHtml(dataset.name)} · ${system} · ${band}<br>%{y:.1f} dB-Hz<extra></extra>`,
+          });
+        }
       }
     }
   }
@@ -6393,6 +6531,7 @@ function satelliteFigure(metric, datasets, systems) {
 function renderSatellite() {
   if (!state.sat.open || !dom.satPlot) return;
   const systems = [...satelliteSelectedSystems()];
+  const bands = [...satelliteSelectedBands()];
   const selectedIds = satelliteSelectedDatasets();
   const datasets = state.datasets.filter((dataset) => selectedIds.has(dataset.id));
   let figure = null;
@@ -6403,10 +6542,12 @@ function renderSatellite() {
     figure = { data: [], layout: compareEmptyLayout('至少选择一条数据') };
   } else if (!systems.length) {
     figure = { data: [], layout: compareEmptyLayout('至少选择一个卫星系统') };
+  } else if (!bands.length) {
+    figure = { data: [], layout: compareEmptyLayout('至少选择一个频点') };
   } else if (state.sat.metric === 'one' && !state.sat.satellite) {
     figure = { data: [], layout: compareEmptyLayout('选择一颗卫星') };
   } else {
-    figure = satelliteFigure(state.sat.metric, datasets, systems);
+    figure = satelliteFigure(state.sat.metric, datasets, systems, bands);
     if (!figure.data.length) {
       figure = { data: [], layout: compareEmptyLayout('当前选择没有可对比的卫星数据') };
     }
@@ -6414,6 +6555,7 @@ function renderSatellite() {
 
   Plotly.react(dom.satPlot, figure.data, figure.layout, PLOT_CONFIG);
   state.satReady = true;
+  bindSatelliteClick();
 }
 
 function renderSatelliteCursor() {
@@ -6424,6 +6566,23 @@ function renderSatelliteCursor() {
   } catch (error) {
     // 图表尚未准备好时忽略
   }
+}
+
+/** 点击卫星对比曲线上的点：切当前时刻并聚焦对应数据（联动地图 / 仪表盘 / 时间轴）。 */
+function bindSatelliteClick() {
+  const element = dom.satPlot;
+  if (!element || typeof element.on !== 'function' || element.__satClickBound) return;
+  element.__satClickBound = true;
+  element.on('plotly_click', (event) => {
+    const point = event.points && event.points[0];
+    if (!point) return;
+    const datasetId = point.data && point.data.meta && point.data.meta.datasetId;
+    const seconds = Number(point.customdata);
+    if (!Number.isFinite(seconds)) return;
+    seekTo(seconds, { followWindow: true });
+    if (datasetId) setFocus(datasetId);
+    else renderEpoch();
+  });
 }
 
 function placeSatelliteWindow() {
@@ -6536,6 +6695,7 @@ function setSatelliteOpen(open) {
 function resetSatelliteConfig() {
   state.sat.metric = 'counts';
   state.sat.systems = null;
+  state.sat.bands = null;
   state.sat.datasets = null;
   state.sat.satellite = null;
   state.sat.rect = null;
@@ -6655,6 +6815,7 @@ function cacheDom() {
   dom.satHead = document.getElementById('sat-head');
   dom.satMetrics = document.getElementById('sat-metrics');
   dom.satSystems = document.getElementById('sat-systems');
+  dom.satBands = document.getElementById('sat-bands');
   dom.satDatasets = document.getElementById('sat-datasets');
   dom.satSatelliteRow = document.getElementById('sat-satellite-row');
   dom.satSatellite = document.getElementById('sat-satellite');

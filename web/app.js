@@ -214,18 +214,11 @@ const SIGNAL_BANDS = {
   QZSS: { 1: 'L1', 2: 'L1', 3: 'L2', 4: 'L5', 5: 'L6', 6: 'L1', 7: 'L2', 8: 'L5' },
   NavIC: { 1: 'L5', 2: 'S' },
 };
-const SAT_BAND_DASH = {
-  L1: 'solid', L2: 'dot', L5: 'dash',
-  G1: 'solid', G2: 'dot',
-  E1: 'solid', E5a: 'dash', E5b: 'dot', E5: 'dashdot', E6: 'dashdot',
-  B1I: 'solid', B1C: 'dash', B1Q: 'dashdot', B2I: 'dot', B2a: 'dashdot',
-  B2b: 'dashdot', B3I: 'longdash', B3Q: 'longdashdot',
-  '默认': 'solid',
-};
 const SAT_BAND_ORDER = [
   'L1', 'L2', 'L5', 'G1', 'G2', 'E1', 'E5a', 'E5b', 'E5', 'E6',
   'B1I', 'B1C', 'B1Q', 'B2I', 'B2a', 'B2b', 'B3I', 'B3Q', '默认',
 ];
+const SAT_DATASET_DASH = ['solid', 'dot'];
 const SAT_DEFAULT_WIDTH = 640;
 const SAT_DEFAULT_HEIGHT = 500;
 const SAT_MIN_WIDTH = 380;
@@ -6099,6 +6092,45 @@ function satelliteBandOf(satellite) {
   return (map && map[key]) || `频点 ${signal}`;
 }
 
+/** 在系统基色上做明暗变化，让同系统的不同频点也能区分。 */
+function mixHexColor(hex, amount) {
+  const value = String(hex || '').replace('#', '');
+  const full = value.length === 3 ? value.split('').map((char) => char + char).join('') : value;
+  const number = Number.parseInt(full, 16);
+  if (!Number.isFinite(number)) return hex;
+  const target = amount >= 0 ? 255 : 0;
+  const weight = Math.min(1, Math.abs(amount));
+  const channel = (shift) => {
+    const base = (number >> shift) & 255;
+    return Math.round(base + (target - base) * weight);
+  };
+  return `rgb(${channel(16)}, ${channel(8)}, ${channel(0)})`;
+}
+
+function satelliteCurveColor(system, band, bands) {
+  const base = SYSTEM_COLORS[system] || '#64748b';
+  const index = Math.max(0, bands.indexOf(band));
+  const adjustments = [0, 0.24, -0.18, 0.4, -0.32, 0.52];
+  return mixHexColor(base, adjustments[index % adjustments.length]);
+}
+
+/** 数据集只用实线 / 点线；数据更多时加粗，避免回到虚线。 */
+function satelliteDatasetStyle(index) {
+  return {
+    dash: SAT_DATASET_DASH[index % SAT_DATASET_DASH.length],
+    width: 1.5 + Math.floor(index / SAT_DATASET_DASH.length) * 0.7,
+  };
+}
+
+function satelliteLegendLayout(dataCount, plotWidth) {
+  const perRow = plotWidth >= 540 ? 3 : (plotWidth >= 360 ? 2 : 1);
+  const rows = Math.max(1, Math.ceil(dataCount / perRow));
+  return {
+    marginTop: 12 + rows * 16,
+    perRow,
+  };
+}
+
 function satelliteSignalKey(satellite) {
   return `${satellite.system}|${satellite.prn}|${satellite.signal || 'default'}`;
 }
@@ -6436,19 +6468,25 @@ function satelliteFigure(metric, datasets, systems, bands) {
         customdata: series.t,
         name: `${dataset.name} · ${parts.system} · ${band}`,
         meta: { datasetId: dataset.id, system: parts.system, band, metric },
-        line: { color: dataset.color, width: 1.6 },
+        line: { color: dataset.color, width: 1.6, dash: 'solid' },
         connectgaps: false,
         hovertemplate: `${escapeHtml(dataset.name)} · ${parts.system} · ${band}<br>%{y:.1f} dB-Hz<extra></extra>`,
       });
     }
   } else {
-    for (const dataset of datasets) {
+    for (let datasetIndex = 0; datasetIndex < datasets.length; datasetIndex += 1) {
+      const dataset = datasets[datasetIndex];
+      const datasetStyle = satelliteDatasetStyle(datasetIndex);
       for (const system of systems) {
         if (!dataset.summary || !(system in dataset.summary.systems)) continue;
-        for (const band of bands) {
+        for (let bandIndex = 0; bandIndex < bands.length; bandIndex += 1) {
+          const band = bands[bandIndex];
           const series = satelliteBandSeries(dataset, system, band, metric);
           if (!series.present) continue;
           if (!series.y.some((value) => value !== null)) continue;
+          const style = datasets.length > 1
+            ? datasetStyle
+            : { dash: bandIndex % 2 === 0 ? 'solid' : 'dot', width: 1.5 };
           data.push({
             type: 'scatter',
             mode: 'lines',
@@ -6458,9 +6496,9 @@ function satelliteFigure(metric, datasets, systems, bands) {
             name: `${dataset.name} · ${system} · ${band}`,
             meta: { datasetId: dataset.id, system, band, metric },
             line: {
-              color: dataset.color,
-              width: 1.5,
-              dash: SAT_BAND_DASH[band] || 'solid',
+              color: satelliteCurveColor(system, band, bands),
+              width: style.width,
+              dash: style.dash,
               shape: metric === 'counts' ? 'hv' : 'linear',
             },
             connectgaps: false,
@@ -6476,14 +6514,23 @@ function satelliteFigure(metric, datasets, systems, bands) {
   const baseline = utcBaseline();
   const dateAxis = baseline !== null;
   const dateStyle = dateAxis ? utcDateStyle(baseline) : 'none';
+  const plotWidth = (dom.satPlot && dom.satPlot.clientWidth) || 640;
+  const legendLayout = satelliteLegendLayout(data.length, plotWidth);
   const layout = {
-    margin: { l: 54, r: 152, t: 12, b: 28 },
+    margin: { l: 54, r: 16, t: legendLayout.marginTop, b: 28 },
     paper_bgcolor: '#ffffff',
     plot_bgcolor: '#ffffff',
     showlegend: true,
     legend: {
-      orientation: 'v', y: 1, x: 1.01, xanchor: 'left',
-      font: { size: 8, color: '#475569' }, bgcolor: 'rgba(0,0,0,0)',
+      orientation: 'h',
+      y: 1.02,
+      x: 0,
+      xanchor: 'left',
+      yanchor: 'bottom',
+      font: { size: 8, color: '#475569' },
+      bgcolor: 'rgba(0,0,0,0)',
+      entrywidth: 150,
+      entrywidthmode: 'pixels',
     },
     hovermode: 'x unified',
     dragmode: 'pan',

@@ -39,27 +39,16 @@
       对比曲线
     </button>
 
-    <button id="btn-toolbox" class="button" type="button" aria-expanded="false" aria-controls="toolbox-panel" title="打开工具箱">
-      工具箱
+    <button id="btn-measure" class="button" type="button" aria-pressed="false" title="打开 / 关闭测距">
+      测距
     </button>
 
-    <button id="btn-lock" class="button" type="button" title="锁定当前位置的轨迹点">锁定标记</button>
+    <button id="btn-lock" class="button" type="button" title="锁定当前位置的轨迹点">锁定当前位置</button>
+
+    <button id="btn-unlock" class="button" type="button" title="取消所有锁定标记" disabled>取消锁定</button>
 
     <span id="epoch-label" class="epoch-label">未加载数据</span>
   </header>
-
-  <div id="toolbox-panel" class="toolbox-panel" hidden>
-    <div class="toolbox-head">工具箱</div>
-    <button id="btn-measure" class="toolbox-item" type="button" aria-pressed="false">
-      距离测量
-    </button>
-    <div id="measure-readout" class="toolbox-readout">在地图上点选两点或多点，测量各段与总距离</div>
-    <div class="toolbox-actions">
-      <button id="measure-undo" type="button" disabled>撤销</button>
-      <button id="measure-clear" type="button" disabled>清除</button>
-      <button id="measure-done" type="button" disabled>完成</button>
-    </div>
-  </div>
 
   <div class="transport">
     <button id="btn-back" class="button icon" type="button" disabled title="后退 1 秒（←）">◀ 1s</button>
@@ -153,6 +142,21 @@
       <button id="legend-window-close" class="legend-toggle" type="button" title="隐藏图例">×</button>
     </header>
     <div id="legend-display" class="legend-display"></div>
+  </section>
+
+  <section id="measure-window" class="measure-window" hidden>
+    <header id="measure-window-head" class="measure-window-head">
+      <span class="measure-window-title">测距</span>
+      <button id="measure-close" class="legend-toggle" type="button" title="关闭测距">×</button>
+    </header>
+    <div class="measure-window-body">
+      <div id="measure-readout" class="toolbox-readout">在地图上点选两点或多点，测量各段与总距离</div>
+      <div class="toolbox-actions">
+        <button id="measure-undo" type="button" disabled>撤销</button>
+        <button id="measure-clear" type="button" disabled>清除</button>
+        <button id="measure-done" type="button" disabled>完成</button>
+      </div>
+    </div>
   </section>
 
   <div id="map-drag-label" class="map-drag-label" hidden></div>

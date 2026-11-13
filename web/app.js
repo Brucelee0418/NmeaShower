@@ -156,6 +156,7 @@ const TRACK_SHAPE_VALUES = new Set(TRACK_SHAPES.map((shape) => shape.value));
 const LAYER_STYLE_KEY = 'nmea.mapLayerStyle.v1';
 
 const LEGEND_LAYOUT_KEY = 'nmea.legendLayout.v1';
+const MEASURE_LAYOUT_KEY = 'nmea.measureLayout.v1';
 const LEGEND_DISPLAY_ITEMS = [
   { key: 'datasets', label: '数据集' },
   { key: 'line', label: '轨迹线' },
@@ -713,7 +714,7 @@ const state = {
   windowFrame: null,
   timelineDrag: null,   // 轨道上的拖动状态：改标尺 / 平移窗口 / 定位当前时刻
   mapDrag: null,        // 拖动地图上的「当前位置」点：{ dataset, clientX, clientY, frame, ... }
-  measure: { active: false, points: [] },  // 地图距离测量：WGS84 顶点
+  measure: { active: false, open: false, pos: null, points: [] },  // 地图距离测量：WGS84 顶点
   measureFrame: null,
   markerBaseFrame: null,     // 轨迹点 / 起点 / 终点覆盖层的重绘帧
   markerCurrentFrame: null,  // 当前位置覆盖层的重绘帧
@@ -1502,8 +1503,8 @@ function updateMeasureReadout() {
   if (dom.measureClear) dom.measureClear.disabled = !points.length;
   if (dom.measureDone) dom.measureDone.disabled = !state.measure.active;
   if (dom.btnMeasure) {
-    dom.btnMeasure.classList.toggle('active', state.measure.active);
-    dom.btnMeasure.setAttribute('aria-pressed', String(state.measure.active));
+    dom.btnMeasure.classList.toggle('active', state.measure.open);
+    dom.btnMeasure.setAttribute('aria-pressed', String(state.measure.open));
   }
 }
 
@@ -1641,42 +1642,51 @@ function setMeasuring(active) {
   updateMeasureReadout();
 }
 
-function positionToolbox() {
-  const panel = dom.toolboxPanel;
-  const button = dom.btnToolbox;
-  if (!panel || !button || panel.hidden) return;
-  const rect = button.getBoundingClientRect();
-  const width = panel.offsetWidth || 248;
-  const height = panel.offsetHeight || 190;
-  const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
-  const top = Math.min(rect.bottom + 6, window.innerHeight - height - 8);
-  panel.style.left = `${left}px`;
-  panel.style.top = `${top}px`;
+function applyMeasureWindowPos() {
+  const element = dom.measureWindow;
+  if (!element || element.hidden) return;
+  const rect = element.getBoundingClientRect();
+  const width = rect.width || 232;
+  const height = rect.height || 120;
+  const pos = state.measure.pos;
+  const left = Math.max(0, Math.min(pos ? pos.x : 12, window.innerWidth - width));
+  const top = Math.max(0, Math.min(
+    pos ? pos.y : window.innerHeight - height - 68,
+    window.innerHeight - height,
+  ));
+  element.style.left = `${left}px`;
+  element.style.top = `${top}px`;
+  element.style.right = 'auto';
+  element.style.bottom = 'auto';
 }
 
-function openToolbox() {
-  if (!dom.toolboxPanel || !dom.btnToolbox) return;
-  dom.toolboxPanel.hidden = false;
-  dom.btnToolbox.classList.add('active');
-  dom.btnToolbox.setAttribute('aria-expanded', 'true');
-  positionToolbox();
+function rememberMeasurePos() {
+  if (!dom.measureWindow) return;
+  const rect = dom.measureWindow.getBoundingClientRect();
+  state.measure.pos = { x: Math.round(rect.left), y: Math.round(rect.top) };
+  saveMeasurePos();
 }
 
-function closeToolbox() {
-  if (!dom.toolboxPanel || !dom.btnToolbox) return;
-  dom.toolboxPanel.hidden = true;
-  dom.btnToolbox.classList.remove('active');
-  dom.btnToolbox.setAttribute('aria-expanded', 'false');
-  if (state.measure.active) setMeasuring(false);
-}
-
-function toggleToolbox() {
-  if (!dom.toolboxPanel) return;
-  if (dom.toolboxPanel.hidden) openToolbox();
-  else closeToolbox();
+function setMeasureWindowOpen(open) {
+  if (open && !state.mapReady) {
+    toast('请先加载 NMEA 文件，再在地图上测距', true);
+    return;
+  }
+  state.measure.open = Boolean(open);
+  if (!dom.measureWindow) return;
+  dom.measureWindow.hidden = !state.measure.open;
+  if (state.measure.open) {
+    applyMeasureWindowPos();
+    setMeasuring(true);
+    renderMeasureOverlay();
+  } else {
+    setMeasuring(false);
+  }
+  updateMeasureReadout();
 }
 
 function resetMeasurement() {
+  if (state.measure.open) setMeasureWindowOpen(false);
   state.measure.points = [];
   state.measure.active = false;
   const map = mapboxMap();
@@ -2087,12 +2097,19 @@ function scheduleLockPosition() {
 }
 
 function updateLockButton() {
-  if (!dom.btnLock) return;
-  const count = state.locks.length;
-  dom.btnLock.title = count
-    ? `锁定当前位置的轨迹点（已锁定 ${count} 个）`
-    : '锁定当前位置的轨迹点';
-  dom.btnLock.classList.toggle('has-locks', count > 0);
+  if (dom.btnLock) {
+    const count = state.locks.length;
+    dom.btnLock.title = count
+      ? `锁定当前位置的轨迹点（已锁定 ${count} 个）`
+      : '锁定当前位置的轨迹点';
+    dom.btnLock.classList.toggle('has-locks', count > 0);
+  }
+  if (dom.btnUnlock) {
+    dom.btnUnlock.disabled = state.locks.length === 0;
+    dom.btnUnlock.title = state.locks.length
+      ? `取消全部 ${state.locks.length} 个锁定标记`
+      : '当前没有锁定标记';
+  }
 }
 
 function renderLockCards() {
@@ -2139,6 +2156,14 @@ function removeLock(id) {
   if (index < 0) return;
   state.locks.splice(index, 1);
   renderLockCards();
+}
+
+function clearLocks() {
+  if (!state.locks.length) return;
+  state.locks = [];
+  hideTrackHover();
+  renderLockCards();
+  toast('已取消全部锁定标记');
 }
 
 function lockCurrentPosition() {
@@ -4927,6 +4952,26 @@ function saveLegendConfig() {
   }
 }
 
+function loadMeasurePos() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(MEASURE_LAYOUT_KEY) || 'null');
+    if (saved && Number.isFinite(Number(saved.x)) && Number.isFinite(Number(saved.y))) {
+      return { x: Number(saved.x), y: Number(saved.y) };
+    }
+  } catch (error) {
+    // 设置损坏时用默认位置
+  }
+  return null;
+}
+
+function saveMeasurePos() {
+  try {
+    localStorage.setItem(MEASURE_LAYOUT_KEY, JSON.stringify(state.measure.pos || {}));
+  } catch (error) {
+    // localStorage 不可用时忽略
+  }
+}
+
 function bringToFront(element) {
   if (!element) return;
   state.floatZ += 1;
@@ -5972,13 +6017,15 @@ function cacheDom() {
   dom.mapTrackHover = document.getElementById('map-track-hover');
   dom.btnLock = document.getElementById('btn-lock');
   dom.measureOverlay = document.getElementById('measure-overlay');
-  dom.btnToolbox = document.getElementById('btn-toolbox');
-  dom.toolboxPanel = document.getElementById('toolbox-panel');
   dom.btnMeasure = document.getElementById('btn-measure');
+  dom.measureWindow = document.getElementById('measure-window');
+  dom.measureWindowHead = document.getElementById('measure-window-head');
+  dom.measureClose = document.getElementById('measure-close');
   dom.measureReadout = document.getElementById('measure-readout');
   dom.measureUndo = document.getElementById('measure-undo');
   dom.measureClear = document.getElementById('measure-clear');
   dom.measureDone = document.getElementById('measure-done');
+  dom.btnUnlock = document.getElementById('btn-unlock');
   dom.btnLegend = document.getElementById('btn-legend');
   dom.legendStyleWindow = document.getElementById('legend-style-window');
   dom.legendStyleHead = document.getElementById('legend-style-head');
@@ -6106,22 +6153,12 @@ function bindEvents() {
     dom.compareWindow.addEventListener('pointerdown', () => bringToFront(dom.compareWindow));
   }
 
-  // 工具箱：距离测量
-  if (dom.btnToolbox) {
-    dom.btnToolbox.addEventListener('click', toggleToolbox);
-  if (dom.btnLock) {
-    dom.btnLock.addEventListener('click', lockCurrentPosition);
-  }
-  if (dom.mapTrackHover) {
-    dom.mapTrackHover.addEventListener('pointerenter', () => {
-      clearTimeout(state.trackHoverTimer);
-      state.trackHoverTimer = null;
-    });
-    dom.mapTrackHover.addEventListener('pointerleave', () => hideTrackHover(150));
-  }
-  }
+  // 测距浮窗 / 锁定标记
   if (dom.btnMeasure) {
-    dom.btnMeasure.addEventListener('click', () => setMeasuring(!state.measure.active));
+    dom.btnMeasure.addEventListener('click', () => setMeasureWindowOpen(!state.measure.open));
+  }
+  if (dom.measureClose) {
+    dom.measureClose.addEventListener('click', () => setMeasureWindowOpen(false));
   }
   if (dom.measureUndo) {
     dom.measureUndo.addEventListener('click', () => {
@@ -6138,23 +6175,32 @@ function bindEvents() {
     });
   }
   if (dom.measureDone) {
-    dom.measureDone.addEventListener('click', () => setMeasuring(false));
+    dom.measureDone.addEventListener('click', () => setMeasureWindowOpen(false));
   }
-  document.addEventListener('pointerdown', (event) => {
-    if (!dom.toolboxPanel || dom.toolboxPanel.hidden) return;
-    if (dom.toolboxPanel.contains(event.target) || dom.btnToolbox.contains(event.target)) return;
-    // 测量时点地图要保持面板可见，方便看总长
-    if (state.measure.active) return;
-    closeToolbox();
-  });
+  if (dom.measureWindow) {
+    attachWindowDrag(dom.measureWindow, dom.measureWindowHead, rememberMeasurePos);
+  }
+  if (dom.btnLock) {
+    dom.btnLock.addEventListener('click', lockCurrentPosition);
+  }
+  if (dom.btnUnlock) {
+    dom.btnUnlock.addEventListener('click', clearLocks);
+  }
+  if (dom.mapTrackHover) {
+    dom.mapTrackHover.addEventListener('pointerenter', () => {
+      clearTimeout(state.trackHoverTimer);
+      state.trackHoverTimer = null;
+    });
+    dom.mapTrackHover.addEventListener('pointerleave', () => hideTrackHover(150));
+  }
 
   document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && state.measure.active) {
-      setMeasuring(false);
+    if (event.key === 'Escape' && state.measure.open) {
+      setMeasureWindowOpen(false);
       return;
     }
-    if (event.key === 'Escape' && dom.toolboxPanel && !dom.toolboxPanel.hidden) {
-      closeToolbox();
+    if (event.key === 'Escape' && state.measure.active) {
+      setMeasuring(false);
       return;
     }
     if (event.key === 'Escape' && state.compare.open) {
@@ -6194,7 +6240,7 @@ function bindEvents() {
 
   window.addEventListener('resize', () => {
     resizePlots();
-    positionToolbox();
+    applyMeasureWindowPos();
     scheduleMeasureDraw();
     scheduleMarkerDraw();
     scheduleLockPosition();
@@ -6233,8 +6279,10 @@ function init() {
   state.layerStyle = loadLayerStyle();
   state.windowLayout = loadWindowLayout();
   state.legend = { ...state.legend, ...loadLegendConfig(), styleOpen: false };
+  state.measure.pos = loadMeasurePos();
   loadCompareConfig();
 
+  updateLockButton();
   buildMapLegend();
   buildCompareChips();
   updateControlState();

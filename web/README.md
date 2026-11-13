@@ -66,7 +66,35 @@ node server.mjs --host 0.0.0.0 --port 8000
 - 距离测量浮窗；
 - 所有窗口位置、样式和对比配置保存在浏览器 `localStorage`。
 
-截图见 [`docs/screenshot-imagery.jpg`](docs/screenshot-imagery.jpg)、[`docs/screenshot-compare.jpg`](docs/screenshot-compare.jpg)。
+截图见 [`docs/screenshot-imagery.jpg`](docs/screenshot-imagery.jpg)、[`docs/screenshot-compare.jpg`](docs/screenshot-compare.jpg)、[`docs/screenshot-satellite.jpg`](docs/screenshot-satellite.jpg)。
+
+## 定位结果对比
+
+顶栏「定位结果对比」可以同时查看多个指标曲线：
+
+- 指标：速度、航向、平均 CN0、卫星数、水平误差；
+- 对齐：绝对 UTC / 相对起点；
+- 曲线统一使用**实线 + 数据点**，颜色跟随数据集；
+- 点击曲线上的点会跳到该时刻，并切换到对应数据；
+- 图例在图表上方，支持滚轮缩放、拖拽平移、双击复位。
+
+![定位结果对比](docs/screenshot-compare.jpg)
+
+## 卫星对比
+
+顶栏「卫星对比」打开独立的卫星对比浮窗：
+
+- 配置区按大类排序：**数据 → 系统 → 频点**，数据是第一层大类；
+- 指标：搜星数 / 平均 CN0 / 单星 CN0；
+- 颜色以**系统色相 + 数据集明暗**为主：
+  - GPS 蓝、BeiDou 紫、GLONASS 红、Galileo 橙、QZSS 青；
+  - 第一个数据集用基础色，第二个用深色，第三个用浅色；
+- 频点用**数据点形状**区分（圆点 / 方块 / 菱形等）；
+- 曲线统一使用**实线 + 数据点**，不用虚线；
+- 图例在图表上方，按文字宽度自动排列；曲线过多时窗口会自动增高，保证绘图区可见；
+- 点击曲线上的点会跳到该时刻并联动地图 / 星空图 / 仪表盘。
+
+![卫星对比](docs/screenshot-satellite.jpg)
 
 ## 数据文件
 
@@ -156,13 +184,15 @@ npm start -- --port 9000
 node server.mjs --port 9000
 ```
 
-**页面能直接双击 `index.html` 打开吗？**
-
-不要。`file://` 会阻止日志读取和地图瓦片；必须通过 `server.mjs`（或其它静态服务器）访问 `http://`。
-
 **地图空白 / 底图不显示？**
 
-ArcGIS、高德一般可直连；Google / OSM 在部分网络需要代理。Node 24+：
+ArcGIS、高德一般可直连；Google / OSM 在部分网络需要代理。`server.mjs` 会自动检测 `HTTPS_PROXY` / `HTTP_PROXY` 和 Windows 系统代理（含 PAC），Node 24+ 可直接使用；也可以显式指定：
+
+```bash
+node server.mjs --proxy http://127.0.0.1:1080
+```
+
+或使用已经配置好环境变量的 shell：
 
 ```bash
 HTTPS_PROXY=http://127.0.0.1:1080 npm run start:proxy

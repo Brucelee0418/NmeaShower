@@ -228,6 +228,9 @@ const SAT_SYSTEM_BAND_ORDER = {
   NavIC: ['L5', 'S'],
 };
 const SAT_MARKER_SYMBOLS = ['circle', 'square', 'diamond', 'triangle-up', 'cross', 'x'];
+const SAT_DATASET_SHIFTS = [0, -0.28, 0.3, -0.45, 0.36, -0.52];
+const SAT_BAND_SHIFTS = [0, 0.08, -0.08, 0.14, -0.12, 0.2, -0.18, 0.24];
+const SAT_BAND_SHIFTS_SINGLE = [0, 0.26, -0.22, 0.46, -0.34, 0.6, -0.48, 0.72];
 const SAT_DEFAULT_WIDTH = 640;
 const SAT_DEFAULT_HEIGHT = 500;
 const SAT_MIN_WIDTH = 380;
@@ -6119,14 +6122,34 @@ function mixHexColor(hex, amount) {
   return `rgb(${channel(16)}, ${channel(8)}, ${channel(0)})`;
 }
 
-function satelliteCurveColor(system, band) {
-  const base = SYSTEM_COLORS[system] || '#64748b';
+function satelliteBandIndex(system, band) {
   const systemOrder = SAT_SYSTEM_BAND_ORDER[system] || [];
   let index = systemOrder.indexOf(band);
   if (index < 0) index = SAT_BAND_ORDER.indexOf(band);
-  if (index < 0) index = 0;
-  const adjustments = [0, 0.26, -0.22, 0.46, -0.34, 0.6, -0.48, 0.72];
-  return mixHexColor(base, adjustments[index % adjustments.length]);
+  return index < 0 ? 0 : index;
+}
+
+function satelliteBandSymbol(system, band) {
+  const index = satelliteBandIndex(system, band);
+  return SAT_MARKER_SYMBOLS[index % SAT_MARKER_SYMBOLS.length];
+}
+
+/**
+ * 颜色以「数据 + 系统」为主：
+ * - 系统决定色相（与系统 chips 对齐）
+ * - 多数据集时，数据集决定明暗（同一个系统的同一频点仍能按数据分组）
+ * - 单数据集时用频点明暗辅助区分；多数据集时频点主要靠点形状
+ */
+function satelliteCurveColor(system, band, datasetIndex, datasetCount) {
+  const base = SYSTEM_COLORS[system] || '#64748b';
+  const bandIndex = satelliteBandIndex(system, band);
+  const datasetShift = datasetCount > 1
+    ? SAT_DATASET_SHIFTS[datasetIndex % SAT_DATASET_SHIFTS.length] : 0;
+  const bandShift = datasetCount > 1
+    ? SAT_BAND_SHIFTS[bandIndex % SAT_BAND_SHIFTS.length]
+    : SAT_BAND_SHIFTS_SINGLE[bandIndex % SAT_BAND_SHIFTS_SINGLE.length];
+  const shift = Math.max(-0.58, Math.min(0.8, datasetShift + bandShift));
+  return mixHexColor(base, shift);
 }
 
 /** 所有曲线用实线 + 数据点；多数据集用点形状区分，完全不用虚线。 */
@@ -6149,6 +6172,19 @@ function satelliteLegendLayout(dataCount, plotWidth, plotHeight) {
     rows,
     perRow,
   };
+}
+
+/** 按最长图例文字估算列宽，避免文字重叠，同时尽量排成多列。 */
+function satelliteLegendEntryWidth(data) {
+  let longest = 0;
+  for (const trace of data) {
+    let width = 0;
+    for (const char of String(trace.name || '')) {
+      width += char.codePointAt(0) > 255 ? 8 : 4.6;
+    }
+    longest = Math.max(longest, width);
+  }
+  return Math.min(240, Math.max(150, Math.ceil(longest) + 38));
 }
 
 function syncSatelliteLegendMargin() {
@@ -6562,7 +6598,7 @@ function satelliteFigure(metric, datasets, systems, bands) {
           const series = satelliteBandSeries(dataset, system, band, metric);
           if (!series.present) continue;
           if (!series.y.some((value) => value !== null)) continue;
-          const color = satelliteCurveColor(system, band);
+          const color = satelliteCurveColor(system, band, datasetIndex, datasets.length);
           data.push({
             type: 'scatter',
             mode: 'lines+markers',
@@ -6580,7 +6616,7 @@ function satelliteFigure(metric, datasets, systems, bands) {
             marker: {
               color,
               size: datasetStyle.size,
-              symbol: datasetStyle.symbol,
+              symbol: satelliteBandSymbol(system, band),
             },
             connectgaps: false,
             hovertemplate: metric === 'counts'
@@ -6598,6 +6634,7 @@ function satelliteFigure(metric, datasets, systems, bands) {
   const plotWidth = (dom.satPlot && dom.satPlot.clientWidth) || 640;
   const plotHeight = (dom.satPlot && dom.satPlot.clientHeight) || 340;
   const legendLayout = satelliteLegendLayout(data.length, plotWidth, plotHeight);
+  const entryWidth = satelliteLegendEntryWidth(data);
   const layout = {
     margin: { l: 54, r: 16, t: legendLayout.marginTop, b: 28 },
     paper_bgcolor: '#ffffff',
@@ -6611,6 +6648,8 @@ function satelliteFigure(metric, datasets, systems, bands) {
       yanchor: 'bottom',
       font: { size: data.length > 18 ? 7 : 8, color: '#475569' },
       bgcolor: 'rgba(0,0,0,0)',
+      entrywidth: entryWidth,
+      entrywidthmode: 'pixels',
     },
     hovermode: 'x unified',
     dragmode: 'pan',

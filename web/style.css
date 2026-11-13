@@ -1105,6 +1105,16 @@ main {
 
 .sat-window .compare-config { gap: 4px; }
 
+.sat-window .sat-major-row {
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sat-window .sat-major-row .compare-label {
+  color: #334155;
+  font-weight: 600;
+}
+
 #sat-satellite-row[hidden] { display: none; }
 
 .sat-window .compare-config .chips {

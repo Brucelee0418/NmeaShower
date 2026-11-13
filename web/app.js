@@ -193,6 +193,19 @@ const DEFAULT_COMPARE_ALIGN = 'absolute';
 const COMPARE_MIN_WIDTH = 360;
 const COMPARE_MIN_HEIGHT = 260;
 
+// 卫星对比：按系统统计搜星数 / 平均 CN0，或对单颗卫星做多数据 CN0 对比
+const SAT_KEY = 'nmea.satCompare.v1';
+const SAT_METRICS = {
+  counts: { name: '搜星数', unit: '颗', digits: 0 },
+  cn0: { name: '平均 CN0', unit: 'dB-Hz', digits: 1 },
+  one: { name: '单星 CN0', unit: 'dB-Hz', digits: 1 },
+};
+const SAT_SYSTEM_ORDER = ['GPS', 'BeiDou', 'GLONASS', 'Galileo', 'QZSS', 'NavIC', 'MULTI'];
+const SAT_SYSTEM_DASH = {
+  GPS: 'solid', BeiDou: 'dash', GLONASS: 'dot', Galileo: 'dashdot',
+  QZSS: 'longdash', NavIC: 'longdashdot', MULTI: 'solid',
+};
+
 /* ------------------------------------------------------------------ *
  * 星空图 / 仪表盘浮窗
  * ------------------------------------------------------------------ */
@@ -709,6 +722,15 @@ const state = {
     rect: null,   // 对比窗尺寸 { w, h }，拖动右下角缩放时写入
   },
   compareReady: false,
+  sat: {
+    open: false,
+    metric: 'counts',
+    systems: null,   // null = 当前数据里的全部系统
+    datasets: null,  // null = 当前全部数据集
+    satellite: null, // 单星模式：`系统|prn`
+    rect: null,      // 拖动后的位置 { x, y }
+  },
+  satReady: false,
   // 时间窗：全局相对秒。start/end 是「时间先后」上的两个标尺，窗口内即为活动区间
   window: { start: 0, end: 0 },
   windowFrame: null,
@@ -2920,6 +2942,10 @@ function buildDatasetLegend() {
       renderLockCards();
       buildCompareChips();
       renderCompare();
+      if (state.sat.open) {
+        buildSatelliteChips();
+        renderSatellite();
+      }
     });
     lineInput.addEventListener('input', () => {
       dataset.lineWidth = Number(lineInput.value);
@@ -4117,6 +4143,14 @@ function applyWindow() {
       if (result && typeof result.catch === 'function') result.catch(() => {});
     }
   }
+
+  if (state.sat.open && state.satReady && dom.satPlot) {
+    const layout = full
+      ? { 'xaxis.autorange': true }
+      : { 'xaxis.range': satelliteWindowRange(), 'xaxis.autorange': false };
+    const result = Plotly.relayout(dom.satPlot, layout);
+    if (result && typeof result.catch === 'function') result.catch(() => {});
+  }
 }
 
 function scheduleWindowApply() {
@@ -4387,6 +4421,7 @@ function renderEpoch() {
   renderAllWindows();
   updateDatasetLegendFocus();
   renderCompareCursor();
+  renderSatelliteCursor();
 }
 
 /** 顶部当前时刻标签：显示聚焦数据集（点击图例里的文件名可切换）。 */
@@ -4441,6 +4476,7 @@ function resizePlots() {
     }
   }
   if (state.compareReady) Plotly.Plots.resize('compare-plot');
+  if (state.satReady) Plotly.Plots.resize('sat-plot');
 }
 
 /* ------------------------------------------------------------------ *
@@ -4724,6 +4760,10 @@ function addDataset(text, name) {
   // 新数据默认把自己的星空图和仪表盘一并打开（可随时从图例或窗口 × 关闭）
   for (const kind of WINDOW_ORDER) openDatasetWindow(dataset, kind);
   renderCompare();
+  if (state.sat.open) {
+    buildSatelliteChips();
+    renderSatellite();
+  }
 
   toast(`已加载 ${name}：${dataset.epochs.length} 个历元，解析 ${elapsed.toFixed(0)} ms`);
   if (dataset.stats.checksumErrors) {
@@ -4762,6 +4802,10 @@ function removeDataset(id) {
   state.mapReady = false;
   state.view = null;
   buildCompareChips();
+  if (state.sat.open) {
+    buildSatelliteChips();
+    renderSatellite();
+  }
 
   if (!state.datasets.length) {
     stopPlayback();
@@ -5359,6 +5403,37 @@ function saveCompareConfig() {
   }
 }
 
+function loadSatelliteConfig() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(SAT_KEY) || 'null');
+    if (saved && SAT_METRICS[saved.metric]) state.sat.metric = saved.metric;
+    if (saved && Array.isArray(saved.systems)) state.sat.systems = saved.systems.slice();
+    if (saved && Array.isArray(saved.datasets)) state.sat.datasets = saved.datasets.slice();
+    if (saved && typeof saved.satellite === 'string') state.sat.satellite = saved.satellite;
+    if (saved && saved.rect
+        && Number.isFinite(Number(saved.rect.x))
+        && Number.isFinite(Number(saved.rect.y))) {
+      state.sat.rect = { x: Number(saved.rect.x), y: Number(saved.rect.y) };
+    }
+  } catch (error) {
+    // 配置损坏时用默认值
+  }
+}
+
+function saveSatelliteConfig() {
+  try {
+    localStorage.setItem(SAT_KEY, JSON.stringify({
+      metric: state.sat.metric,
+      systems: state.sat.systems,
+      datasets: state.sat.datasets,
+      satellite: state.sat.satellite,
+      rect: state.sat.rect,
+    }));
+  } catch (error) {
+    // localStorage 不可用时忽略
+  }
+}
+
 /* ---------------- 水平误差基准（图例里选一条数据） ---------------- */
 /** 当前水平误差的基准数据集。 */
 function referenceDataset() {
@@ -5696,8 +5771,8 @@ function buildCompareChips() {
   if (dom.compareAlign) {
     dom.compareAlign.innerHTML = '';
     for (const [value, label, hint] of [
-      ['relative', '相对起点', '对比曲线：每条数据从自己的起点开始（跨日期也能比）。时间轴/时间窗本身始终是绝对 UTC。'],
-      ['absolute', '绝对 UTC', '对比曲线：按真实 UTC 时间对齐（同一天多次采集适用）。时间轴/时间窗本身始终是绝对 UTC。'],
+      ['relative', '相对起点', '定位结果对比：每条数据从自己的起点开始（跨日期也能比）。时间轴/时间窗本身始终是绝对 UTC。'],
+      ['absolute', '绝对 UTC', '定位结果对比：按真实 UTC 时间对齐（同一天多次采集适用）。时间轴/时间窗本身始终是绝对 UTC。'],
     ]) {
       const chip = document.createElement('button');
       chip.type = 'button';
@@ -5800,6 +5875,7 @@ function setCompareOpen(open) {
   if (dom.btnCompare) dom.btnCompare.setAttribute('aria-pressed', String(open));
   if (open) {
     placeCompareWindow();
+    if (state.sat.open && !state.sat.rect) placeSatelliteWindow();
     buildCompareChips();
     renderCompare();
     // 浮窗（星空图 / 仪表盘）默认是 41+，对比曲线打开时要压在最上面
@@ -5814,7 +5890,7 @@ function setAlign(align) {
   saveCompareConfig();
   buildCompareChips();
   renderCompare();
-  toast(align === 'absolute' ? '对比曲线改为绝对 UTC 对齐' : '对比曲线改为各自起点对齐');
+  toast(align === 'absolute' ? '定位结果对比改为绝对 UTC 对齐' : '定位结果对比改为各自起点对齐');
 }
 
 function resetCompare() {
@@ -5946,6 +6022,480 @@ function bindCompareClick() {
   });
 }
 
+/* ------------------------------------------------------------------ *
+ * 卫星对比
+ *
+ * 直接使用 NMEA 里解析出的 GSV/GSA 卫星：既可以按系统对比搜星数 /
+ * 平均 CN0，也可以固定一颗卫星对比多份数据的 CN0。x 轴始终跟随
+ * 全局绝对 UTC 时间窗。
+ * ------------------------------------------------------------------ */
+function satelliteSystemList() {
+  const present = new Set();
+  for (const dataset of state.datasets) {
+    for (const system of Object.keys((dataset.summary && dataset.summary.systems) || {})) {
+      present.add(system);
+    }
+  }
+  return [...present].sort((a, b) => {
+    const ai = SAT_SYSTEM_ORDER.indexOf(a);
+    const bi = SAT_SYSTEM_ORDER.indexOf(b);
+    return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi) || a.localeCompare(b);
+  });
+}
+
+function satelliteSelectedSystems() {
+  const present = satelliteSystemList();
+  if (state.sat.systems === null) return new Set(present);
+  return new Set(state.sat.systems.filter((system) => present.includes(system)));
+}
+
+function satelliteSelectedDatasets() {
+  if (state.sat.datasets === null) return new Set(state.datasets.map((dataset) => dataset.id));
+  const present = new Set(state.datasets.map((dataset) => dataset.id));
+  return new Set(state.sat.datasets.filter((id) => present.has(id)));
+}
+
+function satelliteAxisValue(relativeSeconds) {
+  const baseline = utcBaseline();
+  if (baseline === null) return relativeSeconds;
+  return utcWallClockMs(baseline + relativeSeconds);
+}
+
+function satelliteX(seconds) {
+  return satelliteAxisValue(Math.max(0, seconds - state.origin));
+}
+
+function satelliteWindowRange() {
+  return [
+    satelliteAxisValue(state.window.start),
+    satelliteAxisValue(state.window.end),
+  ];
+}
+
+function satelliteCountSeries(dataset, system) {
+  const x = [];
+  const y = [];
+  const offset = datasetOffset(dataset);
+  for (let i = 0; i < dataset.epochs.length; i += 1) {
+    if (!Number.isFinite(dataset.times[i])) continue;
+    const epoch = dataset.epochs[i];
+    let count = 0;
+    if (epoch) {
+      for (const satellite of epoch.satellites.values()) {
+        if (satellite.system === system) count += 1;
+      }
+    }
+    x.push(satelliteAxisValue(offset + dataset.times[i]));
+    y.push(count);
+  }
+  return { x, y };
+}
+
+function satelliteCn0Series(dataset, system) {
+  const x = [];
+  const y = [];
+  const offset = datasetOffset(dataset);
+  for (let i = 0; i < dataset.epochs.length; i += 1) {
+    if (!Number.isFinite(dataset.times[i])) continue;
+    const epoch = dataset.epochs[i];
+    let sum = 0;
+    let count = 0;
+    if (epoch) {
+      for (const satellite of epoch.satellites.values()) {
+        if (satellite.system === system && satellite.cn0 !== null && satellite.cn0 > 0) {
+          sum += satellite.cn0;
+          count += 1;
+        }
+      }
+    }
+    x.push(satelliteAxisValue(offset + dataset.times[i]));
+    y.push(count ? sum / count : null);
+  }
+  return { x, y };
+}
+
+function satelliteSingleSeries(dataset, key) {
+  const x = [];
+  const y = [];
+  const offset = datasetOffset(dataset);
+  for (let i = 0; i < dataset.epochs.length; i += 1) {
+    if (!Number.isFinite(dataset.times[i])) continue;
+    const epoch = dataset.epochs[i];
+    const satellite = epoch ? epoch.satellites.get(key) : null;
+    x.push(satelliteAxisValue(offset + dataset.times[i]));
+    y.push(satellite && satellite.cn0 !== null && satellite.cn0 > 0 ? satellite.cn0 : null);
+  }
+  return { x, y };
+}
+
+function splitSatelliteKey(key) {
+  const index = String(key || '').indexOf('|');
+  if (index < 0) return null;
+  return { system: key.slice(0, index), prn: key.slice(index + 1) };
+}
+
+/** 单星下拉里可选的卫星：只保留选中系统里的卫星，按系统和 prn 排序。 */
+function satelliteOptionList(systems) {
+  const entries = new Map();
+  const selectedIds = satelliteSelectedDatasets();
+  for (const dataset of state.datasets) {
+    if (!selectedIds.has(dataset.id)) continue;
+    for (const epoch of dataset.epochs) {
+      for (const satellite of epoch.satellites.values()) {
+        if (!systems.has(satellite.system)) continue;
+        const key = `${satellite.system}|${satellite.prn}`;
+        let entry = entries.get(key);
+        if (!entry) {
+          entry = { key, system: satellite.system, prn: satellite.prn, cn0Count: 0 };
+          entries.set(key, entry);
+        }
+        if (satellite.cn0 !== null && satellite.cn0 > 0) entry.cn0Count += 1;
+      }
+    }
+  }
+  const order = (system) => {
+    const index = SAT_SYSTEM_ORDER.indexOf(system);
+    return index < 0 ? 99 : index;
+  };
+  return [...entries.values()].sort((a, b) => order(a.system) - order(b.system)
+    || (Number(a.prn) || 0) - (Number(b.prn) || 0)
+    || String(a.prn).localeCompare(String(b.prn)));
+}
+
+function buildSatelliteChips() {
+  if (dom.satMetrics) {
+    dom.satMetrics.innerHTML = '';
+    for (const [key, meta] of Object.entries(SAT_METRICS)) {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'chip';
+      chip.textContent = meta.name;
+      chip.title = meta.name;
+      chip.classList.toggle('off', state.sat.metric !== key);
+      chip.addEventListener('click', () => {
+        if (state.sat.metric === key) return;
+        state.sat.metric = key;
+        saveSatelliteConfig();
+        buildSatelliteChips();
+        renderSatellite();
+      });
+      dom.satMetrics.appendChild(chip);
+    }
+  }
+
+  if (dom.satSystems) {
+    dom.satSystems.innerHTML = '';
+    const systems = satelliteSystemList();
+    if (!systems.length) {
+      const empty = document.createElement('span');
+      empty.className = 'compare-empty';
+      empty.textContent = '暂无卫星数据';
+      dom.satSystems.appendChild(empty);
+    }
+    const selected = satelliteSelectedSystems();
+    for (const system of systems) {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'chip';
+      const swatch = document.createElement('span');
+      swatch.className = 'swatch';
+      swatch.style.background = SYSTEM_COLORS[system] || '#94a3b8';
+      chip.append(swatch, document.createTextNode(system));
+      chip.classList.toggle('off', !selected.has(system));
+      chip.addEventListener('click', () => {
+        const current = satelliteSelectedSystems();
+        if (current.has(system)) current.delete(system);
+        else current.add(system);
+        state.sat.systems = [...current];
+        saveSatelliteConfig();
+        buildSatelliteChips();
+        renderSatellite();
+      });
+      dom.satSystems.appendChild(chip);
+    }
+  }
+
+  if (dom.satDatasets) {
+    dom.satDatasets.innerHTML = '';
+    if (!state.datasets.length) {
+      const empty = document.createElement('span');
+      empty.className = 'compare-empty';
+      empty.textContent = '暂无数据';
+      dom.satDatasets.appendChild(empty);
+    }
+    const selected = satelliteSelectedDatasets();
+    for (const dataset of state.datasets) {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'chip';
+      const swatch = document.createElement('span');
+      swatch.className = 'swatch';
+      swatch.style.background = dataset.color;
+      chip.append(swatch, document.createTextNode(dataset.name));
+      chip.classList.toggle('off', !selected.has(dataset.id));
+      chip.addEventListener('click', () => {
+        const current = satelliteSelectedDatasets();
+        if (current.has(dataset.id)) current.delete(dataset.id);
+        else current.add(dataset.id);
+        state.sat.datasets = [...current];
+        saveSatelliteConfig();
+        buildSatelliteChips();
+        renderSatellite();
+      });
+      dom.satDatasets.appendChild(chip);
+    }
+  }
+
+  if (dom.satSatelliteRow) dom.satSatelliteRow.hidden = state.sat.metric !== 'one';
+  if (dom.satSatellite && state.sat.metric === 'one') {
+    const selectedSystems = satelliteSelectedSystems();
+    const options = satelliteOptionList(selectedSystems);
+    let current = state.sat.satellite;
+    if (!options.some((option) => option.key === current)) {
+      const preferred = options.find((option) => option.cn0Count > 0) || options[0];
+      current = preferred ? preferred.key : null;
+      state.sat.satellite = current;
+      saveSatelliteConfig();
+    }
+    dom.satSatellite.innerHTML = '';
+    if (!options.length) {
+      const option = document.createElement('option');
+      option.textContent = '无卫星数据';
+      option.value = '';
+      dom.satSatellite.appendChild(option);
+      dom.satSatellite.disabled = true;
+    } else {
+      dom.satSatellite.disabled = false;
+      for (const item of options) {
+        const option = document.createElement('option');
+        option.value = item.key;
+        option.textContent = `${SYSTEM_PREFIX[item.system] || ''}${item.prn} · ${item.system}`;
+        option.selected = item.key === current;
+        dom.satSatellite.appendChild(option);
+      }
+    }
+  }
+}
+
+function satelliteFigure(metric, datasets, systems) {
+  const data = [];
+  const meta = SAT_METRICS[metric];
+  if (metric === 'one') {
+    const parts = splitSatelliteKey(state.sat.satellite);
+    if (!parts) return { data, layout: compareEmptyLayout('选择一颗卫星') };
+    for (const dataset of datasets) {
+      const series = satelliteSingleSeries(dataset, state.sat.satellite);
+      if (!series.y.some((value) => value !== null)) continue;
+      data.push({
+        type: 'scatter',
+        mode: 'lines',
+        x: series.x,
+        y: series.y,
+        name: dataset.name,
+        meta: { datasetId: dataset.id, metric },
+        line: { color: dataset.color, width: 1.6 },
+        connectgaps: false,
+        hovertemplate: `${escapeHtml(dataset.name)}<br>%{y:.1f} dB-Hz<extra></extra>`,
+      });
+    }
+  } else {
+    for (const dataset of datasets) {
+      for (const system of systems) {
+        if (!dataset.summary || !(system in dataset.summary.systems)) continue;
+        const series = metric === 'counts'
+          ? satelliteCountSeries(dataset, system)
+          : satelliteCn0Series(dataset, system);
+        if (!series.y.some((value) => value !== null)) continue;
+        data.push({
+          type: 'scatter',
+          mode: 'lines',
+          x: series.x,
+          y: series.y,
+          name: `${dataset.name} · ${system}`,
+          meta: { datasetId: dataset.id, system, metric },
+          line: {
+            color: dataset.color,
+            width: 1.5,
+            dash: SAT_SYSTEM_DASH[system] || 'solid',
+            shape: metric === 'counts' ? 'hv' : 'linear',
+          },
+          connectgaps: false,
+          hovertemplate: metric === 'counts'
+            ? `${escapeHtml(dataset.name)} · ${system}<br>%{y:.0f} 颗<extra></extra>`
+            : `${escapeHtml(dataset.name)} · ${system}<br>%{y:.1f} dB-Hz<extra></extra>`,
+        });
+      }
+    }
+  }
+
+  const baseline = utcBaseline();
+  const dateAxis = baseline !== null;
+  const dateStyle = dateAxis ? utcDateStyle(baseline) : 'none';
+  const layout = {
+    margin: { l: 54, r: 152, t: 12, b: 28 },
+    paper_bgcolor: '#ffffff',
+    plot_bgcolor: '#ffffff',
+    showlegend: true,
+    legend: {
+      orientation: 'v', y: 1, x: 1.01, xanchor: 'left',
+      font: { size: 8, color: '#475569' }, bgcolor: 'rgba(0,0,0,0)',
+    },
+    hovermode: 'x unified',
+    dragmode: 'pan',
+    shapes: [cursorShape(satelliteX(state.now))],
+    xaxis: {
+      tickfont: { size: 8, color: '#64748b' },
+      gridcolor: '#eef2f7',
+      zeroline: false,
+    },
+    yaxis: {
+      title: {
+        text: `${meta.name}${meta.unit ? ` (${meta.unit})` : ''}`,
+        font: { size: 9, color: '#64748b' },
+      },
+      rangemode: metric === 'counts' ? 'tozero' : 'normal',
+      tickfont: { size: 8, color: '#64748b' },
+      gridcolor: '#eef2f7',
+      zeroline: false,
+    },
+  };
+
+  if (!windowIsFull()) {
+    layout.xaxis.range = satelliteWindowRange();
+    layout.xaxis.autorange = false;
+  }
+  if (dateAxis) {
+    layout.xaxis.type = 'date';
+    layout.xaxis.hoverformat = dateStyle === 'year'
+      ? '%Y-%m-%d %H:%M:%S'
+      : (dateStyle === 'month' ? '%m-%d %H:%M:%S' : '%H:%M:%S');
+    layout.xaxis.tickformatstops = [
+      { dtickrange: [null, 1000], value: '%H:%M:%S.%L' },
+      { dtickrange: [1000, 60000], value: '%H:%M:%S' },
+      { dtickrange: [60000, 3600000], value: '%H:%M' },
+      { dtickrange: [3600000, null], value: '%m-%d %H:%M' },
+    ];
+    if (layout.xaxis.range) {
+      layout.xaxis.range = layout.xaxis.range.map((value) => new Date(value).toISOString());
+    }
+  }
+  return { data, layout };
+}
+
+function renderSatellite() {
+  if (!state.sat.open || !dom.satPlot) return;
+  const systems = [...satelliteSelectedSystems()];
+  const selectedIds = satelliteSelectedDatasets();
+  const datasets = state.datasets.filter((dataset) => selectedIds.has(dataset.id));
+  let figure = null;
+
+  if (!state.datasets.length) {
+    figure = { data: [], layout: compareEmptyLayout('拖入 NMEA 文件后可对比卫星') };
+  } else if (!datasets.length) {
+    figure = { data: [], layout: compareEmptyLayout('至少选择一条数据') };
+  } else if (!systems.length) {
+    figure = { data: [], layout: compareEmptyLayout('至少选择一个卫星系统') };
+  } else if (state.sat.metric === 'one' && !state.sat.satellite) {
+    figure = { data: [], layout: compareEmptyLayout('选择一颗卫星') };
+  } else {
+    figure = satelliteFigure(state.sat.metric, datasets, systems);
+    if (!figure.data.length) {
+      figure = { data: [], layout: compareEmptyLayout('当前选择没有可对比的卫星数据') };
+    }
+  }
+
+  Plotly.react(dom.satPlot, figure.data, figure.layout, PLOT_CONFIG);
+  state.satReady = true;
+}
+
+function renderSatelliteCursor() {
+  if (!state.sat.open || !state.satReady || !dom.satPlot || !dom.satPlot._fullLayout) return;
+  try {
+    const result = Plotly.relayout(dom.satPlot, { shapes: [cursorShape(satelliteX(state.now))] });
+    if (result && typeof result.catch === 'function') result.catch(() => {});
+  } catch (error) {
+    // 图表尚未准备好时忽略
+  }
+}
+
+function placeSatelliteWindow() {
+  const element = dom.satWindow;
+  if (!element) return;
+  const width = Math.max(320, Math.min(640, window.innerWidth - 24));
+  const height = Math.max(300, Math.min(460, window.innerHeight - 100));
+  element.style.width = `${width}px`;
+  element.style.height = `${height}px`;
+  const saved = state.sat.rect;
+  if (saved) {
+    const left = Math.max(0, Math.min(window.innerWidth - width, saved.x));
+    const top = Math.max(0, Math.min(window.innerHeight - height, saved.y));
+    element.style.left = `${left}px`;
+    element.style.top = `${top}px`;
+    element.style.right = 'auto';
+    element.style.bottom = 'auto';
+  } else {
+    // 定位结果对比打开时优先并排放到它右侧，否则避开左侧图例停在地图上方
+    let left = null;
+    let top = null;
+    const compareVisible = dom.compareWindow && !dom.compareWindow.hidden;
+    if (compareVisible) {
+      const compareRect = dom.compareWindow.getBoundingClientRect();
+      const rightLeft = window.innerWidth - width - 16;
+      if (rightLeft >= compareRect.right + 4) {
+        left = rightLeft;
+        top = Math.max(60, Math.min(compareRect.top, window.innerHeight - height - 16));
+      }
+    }
+    if (left === null) {
+      left = Math.max(12, Math.min(window.innerWidth - width - 12, 320));
+      top = Math.min(
+        Math.max(60, transportBottom() + 8),
+        Math.max(60, window.innerHeight - height - 16),
+      );
+    }
+    element.style.left = `${left}px`;
+    element.style.top = `${top}px`;
+    element.style.right = 'auto';
+    element.style.bottom = 'auto';
+  }
+}
+
+function rememberSatelliteRect() {
+  if (!dom.satWindow) return;
+  const rect = dom.satWindow.getBoundingClientRect();
+  state.sat.rect = { x: Math.round(rect.left), y: Math.round(rect.top) };
+  saveSatelliteConfig();
+}
+
+function setSatelliteOpen(open) {
+  state.sat.open = Boolean(open);
+  if (dom.satWindow) dom.satWindow.hidden = !state.sat.open;
+  if (dom.btnSat) dom.btnSat.setAttribute('aria-pressed', String(state.sat.open));
+  if (!state.sat.open) return;
+  placeSatelliteWindow();
+  buildSatelliteChips();
+  renderSatellite();
+  if (dom.satWindow) bringToFront(dom.satWindow);
+}
+
+function resetSatelliteConfig() {
+  state.sat.metric = 'counts';
+  state.sat.systems = null;
+  state.sat.datasets = null;
+  state.sat.satellite = null;
+  state.sat.rect = null;
+  try {
+    localStorage.removeItem(SAT_KEY);
+  } catch (error) {
+    // localStorage 不可用时忽略
+  }
+  placeSatelliteWindow();
+  buildSatelliteChips();
+  renderSatellite();
+  toast('卫星对比配置已重置');
+}
+
+
 /** 可拖动的浮窗标题栏（对比曲线使用）。 */
 function attachWindowDrag(windowElement, handle, onEnd) {
   if (!windowElement || !handle || handle.__dragBound) return;
@@ -6045,6 +6595,17 @@ function cacheDom() {
   dom.compareZoomIn = document.getElementById('compare-zoom-in');
   dom.compareZoomOut = document.getElementById('compare-zoom-out');
   dom.compareZoomReset = document.getElementById('compare-zoom-reset');
+  dom.btnSat = document.getElementById('btn-sat');
+  dom.satWindow = document.getElementById('sat-window');
+  dom.satHead = document.getElementById('sat-head');
+  dom.satMetrics = document.getElementById('sat-metrics');
+  dom.satSystems = document.getElementById('sat-systems');
+  dom.satDatasets = document.getElementById('sat-datasets');
+  dom.satSatelliteRow = document.getElementById('sat-satellite-row');
+  dom.satSatellite = document.getElementById('sat-satellite');
+  dom.satPlot = document.getElementById('sat-plot');
+  dom.satReset = document.getElementById('sat-reset');
+  dom.satClose = document.getElementById('sat-close');
 }
 
 function bindEvents() {
@@ -6144,6 +6705,28 @@ function bindEvents() {
     dom.compareWindow.addEventListener('pointerdown', () => bringToFront(dom.compareWindow));
   }
 
+  // 卫星对比浮窗
+  if (dom.btnSat) {
+    dom.btnSat.addEventListener('click', () => setSatelliteOpen(!state.sat.open));
+  }
+  if (dom.satClose) {
+    dom.satClose.addEventListener('click', () => setSatelliteOpen(false));
+  }
+  if (dom.satReset) {
+    dom.satReset.addEventListener('click', resetSatelliteConfig);
+  }
+  if (dom.satSatellite) {
+    dom.satSatellite.addEventListener('change', () => {
+      state.sat.satellite = dom.satSatellite.value || null;
+      saveSatelliteConfig();
+      renderSatellite();
+    });
+  }
+  if (dom.satWindow) {
+    attachWindowDrag(dom.satWindow, dom.satHead, rememberSatelliteRect);
+    dom.satWindow.addEventListener('pointerdown', () => bringToFront(dom.satWindow));
+  }
+
   // 测距浮窗 / 锁定标记
   if (dom.btnMeasure) {
     dom.btnMeasure.addEventListener('click', () => setMeasureWindowOpen(!state.measure.open));
@@ -6191,6 +6774,10 @@ function bindEvents() {
       setMeasuring(false);
       return;
     }
+    if (event.key === 'Escape' && state.sat.open) {
+      setSatelliteOpen(false);
+      return;
+    }
     if (event.key === 'Escape' && state.compare.open) {
       setCompareOpen(false);
       return;
@@ -6229,6 +6816,7 @@ function bindEvents() {
   window.addEventListener('resize', () => {
     resizePlots();
     applyMeasureWindowPos();
+    if (state.sat.open) placeSatelliteWindow();
     scheduleMeasureDraw();
     scheduleMarkerDraw();
     scheduleLockPosition();
@@ -6269,6 +6857,7 @@ function init() {
   state.legend = { ...state.legend, ...loadLegendConfig(), styleOpen: false };
   state.measure.pos = loadMeasurePos();
   loadCompareConfig();
+  loadSatelliteConfig();
 
   updateLockButton();
   buildMapLegend();

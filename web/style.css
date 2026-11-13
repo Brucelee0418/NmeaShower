@@ -1107,6 +1107,36 @@ main {
 
 .compare-window[hidden] { display: none; }
 
+/* 卫星对比：复用定位结果对比的窗口骨架，默认停在右下角 */
+.sat-window {
+  width: 640px;
+  height: 460px;
+  z-index: 36;
+}
+
+.sat-window .compare-config { gap: 4px; }
+
+#sat-satellite-row[hidden] { display: none; }
+
+.sat-window .compare-config .chips {
+  flex-wrap: wrap;
+  max-height: 42px;
+  overflow-y: auto;
+}
+
+.sat-select {
+  appearance: none;
+  min-width: 150px;
+  max-width: 100%;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: #ffffff;
+  color: #334155;
+  font: inherit;
+  font-size: 10px;
+}
+
 .compare-head {
   display: flex;
   align-items: center;
@@ -1627,6 +1657,7 @@ body.dragging::after {
 
 #btn-legend[aria-pressed="true"],
 #btn-compare[aria-pressed="true"],
+#btn-sat[aria-pressed="true"],
 #btn-measure[aria-pressed="true"] {
   background: #1d4ed8;
   border-color: #2563eb;

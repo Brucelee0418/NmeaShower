@@ -35,8 +35,12 @@
       图例
     </button>
 
-    <button id="btn-compare" class="button" type="button" aria-pressed="false" title="打开 / 关闭对比曲线浮窗">
-      对比曲线
+    <button id="btn-compare" class="button" type="button" aria-pressed="false" title="打开 / 关闭定位结果对比浮窗">
+      定位结果对比
+    </button>
+
+    <button id="btn-sat" class="button" type="button" aria-pressed="false" title="打开 / 关闭卫星对比浮窗">
+      卫星对比
     </button>
 
     <button id="btn-measure" class="button" type="button" aria-pressed="false" title="打开 / 关闭测距">
@@ -161,7 +165,7 @@
 
   <section id="compare-window" class="compare-window" hidden>
     <header class="compare-head">
-      <span class="compare-title">对比曲线</span>
+      <span class="compare-title">定位结果对比</span>
       <div class="compare-actions">
         <button id="compare-zoom-out" class="legend-reset" type="button" title="曲线缩小（滚轮也可缩放）">−</button>
         <button id="compare-zoom-in" class="legend-reset" type="button" title="曲线放大（滚轮也可缩放）">+</button>
@@ -187,6 +191,36 @@
     <div id="compare-plot" class="compare-plot"></div>
     <div class="compare-hint">滚轮缩放 · 拖拽平移 · 双击复位 · 悬停查看数值 · 点击曲线上的点跳转到该时刻</div>
     <div class="float-resize" title="拖动调整大小"></div>
+  </section>
+
+  <section id="sat-window" class="compare-window sat-window" hidden>
+    <header id="sat-head" class="compare-head">
+      <span class="compare-title">卫星对比</span>
+      <div class="compare-actions">
+        <button id="sat-reset" class="legend-reset" type="button" title="恢复默认指标、系统与数据选择">重置配置</button>
+        <button id="sat-close" class="legend-toggle" type="button" title="关闭">×</button>
+      </div>
+    </header>
+    <div class="compare-config sat-config">
+      <div class="compare-config-row">
+        <span class="compare-label">指标</span>
+        <div id="sat-metrics" class="chips"></div>
+      </div>
+      <div class="compare-config-row">
+        <span class="compare-label">系统</span>
+        <div id="sat-systems" class="chips"></div>
+      </div>
+      <div class="compare-config-row">
+        <span class="compare-label">数据</span>
+        <div id="sat-datasets" class="chips"></div>
+      </div>
+      <div id="sat-satellite-row" class="compare-config-row" hidden>
+        <span class="compare-label">卫星</span>
+        <select id="sat-satellite" class="sat-select" title="选择要对比的单颗卫星"></select>
+      </div>
+    </div>
+    <div id="sat-plot" class="compare-plot"></div>
+    <div class="compare-hint">滚轮缩放 · 拖拽平移 · 双击复位 · 悬停查看数值</div>
   </section>
 
   <div id="toast" class="toast" hidden></div>

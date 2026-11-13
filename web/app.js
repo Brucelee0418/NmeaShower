@@ -222,7 +222,7 @@ const SAT_DATASET_DASH = ['solid', 'dot'];
 const SAT_DEFAULT_WIDTH = 640;
 const SAT_DEFAULT_HEIGHT = 500;
 const SAT_MIN_WIDTH = 380;
-const SAT_MIN_HEIGHT = 280;
+const SAT_MIN_HEIGHT = 360;
 
 /* ------------------------------------------------------------------ *
  * 星空图 / 仪表盘浮窗
@@ -4504,7 +4504,10 @@ function resizePlots() {
     }
   }
   if (state.compareReady) Plotly.Plots.resize('compare-plot');
-  if (state.satReady) Plotly.Plots.resize('sat-plot');
+  if (state.satReady) {
+    Plotly.Plots.resize('sat-plot');
+    syncSatelliteLegendMargin();
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -6122,13 +6125,59 @@ function satelliteDatasetStyle(index) {
   };
 }
 
-function satelliteLegendLayout(dataCount, plotWidth) {
-  const perRow = plotWidth >= 540 ? 3 : (plotWidth >= 360 ? 2 : 1);
+function satelliteLegendLayout(dataCount, plotWidth, plotHeight) {
+  const perRow = plotWidth >= 900 ? 3 : 2;
   const rows = Math.max(1, Math.ceil(dataCount / perRow));
+  const desired = 14 + rows * 18;
+  const maxTop = Math.max(28, plotHeight - 140 - 28);
   return {
-    marginTop: 12 + rows * 16,
+    marginTop: Math.min(desired, maxTop),
+    desired,
+    rows,
     perRow,
   };
+}
+
+function syncSatelliteLegendMargin() {
+  if (!state.sat.open || !state.satReady || !dom.satPlot || !dom.satPlot._fullLayout) return;
+  const element = dom.satPlot;
+  const legendLayout = satelliteLegendLayout(
+    element.data.length,
+    element.clientWidth,
+    element.clientHeight,
+  );
+  if (Math.abs((element._fullLayout.margin.t || 0) - legendLayout.marginTop) < 0.5) return;
+  try {
+    const result = Plotly.relayout(element, { 'margin.t': legendLayout.marginTop });
+    if (result && typeof result.catch === 'function') result.catch(() => {});
+  } catch (error) {
+    // 浮窗正在关闭 / 重排时忽略
+  }
+}
+
+/** 图例置顶后保证实际绘图区不被压扁；必要时自动把卫星窗口拉高。 */
+function ensureSatellitePlotHeight() {
+  if (!state.sat.open || !state.satReady || !dom.satWindow || !dom.satPlot) return;
+  const layout = dom.satPlot._fullLayout;
+  if (!layout || !layout._size) return;
+  const minPlotHeight = 200;
+  if (layout._size.h >= minPlotHeight) return;
+
+  const rect = dom.satWindow.getBoundingClientRect();
+  const maxHeight = Math.max(SAT_MIN_HEIGHT, window.innerHeight - 20);
+  const nextHeight = Math.min(rect.height + (minPlotHeight - layout._size.h) + 32, maxHeight);
+  if (nextHeight <= rect.height + 2) return;
+
+  const nextTop = Math.max(4, Math.min(rect.top, window.innerHeight - nextHeight - 4));
+  dom.satWindow.style.height = `${nextHeight}px`;
+  dom.satWindow.style.top = `${nextTop}px`;
+  try {
+    Plotly.Plots.resize('sat-plot');
+  } catch (error) {
+    // 窗口正在关闭时忽略
+  }
+  syncSatelliteLegendMargin();
+  rememberSatelliteRect();
 }
 
 function satelliteSignalKey(satellite) {
@@ -6515,7 +6564,8 @@ function satelliteFigure(metric, datasets, systems, bands) {
   const dateAxis = baseline !== null;
   const dateStyle = dateAxis ? utcDateStyle(baseline) : 'none';
   const plotWidth = (dom.satPlot && dom.satPlot.clientWidth) || 640;
-  const legendLayout = satelliteLegendLayout(data.length, plotWidth);
+  const plotHeight = (dom.satPlot && dom.satPlot.clientHeight) || 340;
+  const legendLayout = satelliteLegendLayout(data.length, plotWidth, plotHeight);
   const layout = {
     margin: { l: 54, r: 16, t: legendLayout.marginTop, b: 28 },
     paper_bgcolor: '#ffffff',
@@ -6527,7 +6577,7 @@ function satelliteFigure(metric, datasets, systems, bands) {
       x: 0,
       xanchor: 'left',
       yanchor: 'bottom',
-      font: { size: 8, color: '#475569' },
+      font: { size: data.length > 18 ? 7 : 8, color: '#475569' },
       bgcolor: 'rgba(0,0,0,0)',
       entrywidth: 150,
       entrywidthmode: 'pixels',
@@ -6602,6 +6652,7 @@ function renderSatellite() {
   Plotly.react(dom.satPlot, figure.data, figure.layout, PLOT_CONFIG);
   state.satReady = true;
   bindSatelliteClick();
+  window.requestAnimationFrame(() => ensureSatellitePlotHeight());
 }
 
 function renderSatelliteCursor() {
@@ -6720,6 +6771,7 @@ function attachSatelliteResize() {
       rememberSatelliteRect();
       if (state.satReady) {
         try { Plotly.Plots.resize('sat-plot'); } catch (error) { /* 忽略 */ }
+        syncSatelliteLegendMargin();
       }
     };
     window.addEventListener('pointermove', onMove);

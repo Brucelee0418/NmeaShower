@@ -1,16 +1,10 @@
-# Python
-__pycache__/
-*.py[cod]
-.pytest_cache/
-
-# 运行产物
-out/
-.cache/
-.scratch/
-
 # Node
 node_modules/
 package-lock.json
+
+# 运行产物
+.cache/
+.scratch/
 
 # 本地采集数据（不进入仓库）
 /*.log

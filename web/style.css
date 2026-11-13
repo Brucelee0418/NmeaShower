@@ -120,6 +120,36 @@ body {
 
 .transport .button.play:hover:not(:disabled) { background: #2563eb; }
 
+.step-control {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: #94a3b8;
+  font-size: 10px;
+}
+
+.step-select {
+  appearance: none;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  background-color: #0f172a;
+  background-image:
+    linear-gradient(45deg, transparent 50%, #94a3b8 50%),
+    linear-gradient(135deg, #94a3b8 50%, transparent 50%);
+  background-position: calc(100% - 10px) 55%, calc(100% - 6px) 55%;
+  background-size: 4px 4px, 4px 4px;
+  background-repeat: no-repeat;
+  color: #cbd5e1;
+  padding: 4px 18px 4px 8px;
+  font: inherit;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.step-select:hover:not(:disabled) { border-color: #475569; background-color: #1e293b; }
+.step-select:disabled { opacity: 0.45; cursor: not-allowed; }
+
 .rate-group {
   display: flex;
   border: 1px solid #334155;

@@ -37,6 +37,7 @@ const CN0_SCALE = [
 ];
 const CN0_MIN = 10;
 const CN0_MAX = 50;
+const STEP_OPTIONS = [1, 5, 60, 300, 600];
 
 const COMPASS_POINTS = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE',
   'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
@@ -720,6 +721,7 @@ const state = {
   duration: 0,        // 全部数据集覆盖的时间跨度
   playing: false,
   rate: 1,            // 播放倍速
+  stepSeconds: 1,     // 快进 / 后退步长（秒）
   playAnchorWall: 0,  // 播放起点的墙钟时间
   playAnchorTime: 0,  // 播放起点的数据时间
   rafHandle: null,
@@ -4579,7 +4581,7 @@ function setRate(rate) {
   }
 }
 
-/** 按秒跳转：delta 为 +1 / -1，限制在时间窗内。 */
+/** 按秒跳转：delta 为秒数（正负），限制在时间窗内。 */
 function stepTime(delta) {
   if (!state.datasets.length) return;
   stopPlayback();
@@ -4587,6 +4589,27 @@ function stepTime(delta) {
   const clamped = Math.min(state.window.end, Math.max(state.window.start, rel));
   setGlobalTime(state.origin + clamped);
   requestRender();
+}
+
+function stepLabel(seconds) {
+  if (seconds >= 60) return `${seconds / 60}min`;
+  return `${seconds}s`;
+}
+
+/** 设置快进 / 后退步长，并同步按钮文字与下拉框。 */
+function setStepSeconds(seconds) {
+  const value = STEP_OPTIONS.includes(Number(seconds)) ? Number(seconds) : 1;
+  state.stepSeconds = value;
+  const label = stepLabel(value);
+  if (dom.stepSize) dom.stepSize.value = String(value);
+  if (dom.btnBack) {
+    dom.btnBack.textContent = `◀ ${label}`;
+    dom.btnBack.title = `按当前步长后退（←）：${label}`;
+  }
+  if (dom.btnFwd) {
+    dom.btnFwd.textContent = `${label} ▶`;
+    dom.btnFwd.title = `按当前步长前进（→）：${label}`;
+  }
 }
 
 /**
@@ -4705,6 +4728,7 @@ function updateControlState() {
   dom.btnPlay.disabled = !enabled;
   dom.btnBack.disabled = !enabled;
   dom.btnFwd.disabled = !enabled;
+  if (dom.stepSize) dom.stepSize.disabled = !enabled;
   for (const button of dom.rateButtons) button.disabled = !enabled;
 }
 
@@ -6752,6 +6776,7 @@ function cacheDom() {
   dom.btnPlay = document.getElementById('btn-play');
   dom.btnBack = document.getElementById('btn-back');
   dom.btnFwd = document.getElementById('btn-fwd');
+  dom.stepSize = document.getElementById('step-size');
   dom.rateButtons = Array.from(document.querySelectorAll('.rate'));
   dom.timeNow = document.getElementById('time-now');
   dom.timeTotal = document.getElementById('time-total');
@@ -6848,8 +6873,12 @@ function bindEvents() {
   });
 
   dom.btnPlay.addEventListener('click', togglePlayback);
-  dom.btnBack.addEventListener('click', () => stepTime(-1));
-  dom.btnFwd.addEventListener('click', () => stepTime(1));
+  dom.btnBack.addEventListener('click', () => stepTime(-state.stepSeconds));
+  dom.btnFwd.addEventListener('click', () => stepTime(state.stepSeconds));
+  if (dom.stepSize) {
+    dom.stepSize.addEventListener('change', () => setStepSeconds(dom.stepSize.value));
+  }
+  setStepSeconds(state.stepSeconds);
 
   dom.legendReset.addEventListener('click', resetLayerStyle);
 
@@ -7007,10 +7036,10 @@ function bindEvents() {
       togglePlayback();
     } else if (event.code === 'ArrowRight') {
       event.preventDefault();
-      stepTime(1);
+      stepTime(state.stepSeconds);
     } else if (event.code === 'ArrowLeft') {
       event.preventDefault();
-      stepTime(-1);
+      stepTime(-state.stepSeconds);
     }
   });
 

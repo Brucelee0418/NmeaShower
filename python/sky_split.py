@@ -26,7 +26,7 @@
 
 用法::
 
-    python sky_split.py                     # 分析 nmea.log，写出 out/sky_split/* 与 web/sky_split.json
+    python sky_split.py                     # 分析 nmea.log，写出 out/sky_split/* 与 out/sky_split.json
     python sky_split.py --window 5          # 只跑 5 s 窗口
     python sky_split.py --rot-step 10       # 旋转增强步长
     python sky_split.py --print              # 额外打印关键指标
@@ -50,6 +50,8 @@ os.environ.setdefault("LOKY_MAX_CPU_COUNT", "4")
 import numpy as np
 
 from nmea_parser import parse_file
+
+BASE = Path(__file__).resolve().parent
 
 __all__ = [
     "SkyData",
@@ -1293,8 +1295,8 @@ def analyse(
 # --------------------------------------------------------------------------- #
 # 导出
 # --------------------------------------------------------------------------- #
-def web_payload(result: SkySplitResult, window: float | None = None) -> dict:
-    """给 ``web/app.js`` 用的星空图分割数据（按历元给出两条曲线与逐星概率）。"""
+def export_payload(result: SkySplitResult, window: float | None = None) -> dict:
+    """导出给任意可视化查看器使用的分割数据（逐历元曲线 + 逐星直射概率）。"""
     window = result.main_window if window is None else window
     classifier = result.classifiers[window]
     data = result.data
@@ -1336,8 +1338,8 @@ def web_payload(result: SkySplitResult, window: float | None = None) -> dict:
     }
 
 
-def write_outputs(result: SkySplitResult, out_dir: Path, web_path: Path | None = None) -> dict:
-    """写出 JSON / CSV / 前端数据。"""
+def write_outputs(result: SkySplitResult, out_dir: Path, export_path: Path | None = None) -> dict:
+    """写出 JSON / CSV / 可视化导出数据。"""
     import csv
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1392,10 +1394,10 @@ def write_outputs(result: SkySplitResult, out_dir: Path, web_path: Path | None =
                 round(float((result.center_azimuth + east) % 360), 2),
             ])
 
-    if web_path is not None:
-        payload = web_payload(result)
-        web_path.parent.mkdir(parents=True, exist_ok=True)
-        web_path.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    if export_path is not None:
+        payload = export_payload(result)
+        export_path.parent.mkdir(parents=True, exist_ok=True)
+        export_path.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
 
     return summary
 
@@ -1433,13 +1435,14 @@ def _print_summary(summary: dict) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="无监督天空遮挡分割（task3）")
-    parser.add_argument("file", nargs="?", default="nmea.log", help="NMEA 文件路径")
+    parser.add_argument("file", nargs="?", type=Path, default=BASE / "nmea.log", help="NMEA 文件路径")
     parser.add_argument("--window", type=float, nargs="*", default=list(DEFAULT_WINDOWS),
                         help="抖动仿真的时间窗（秒），0 表示只用当前历元")
     parser.add_argument("--rot-step", type=float, default=10.0, help="旋转增强步长（度）")
-    parser.add_argument("--out", type=Path, default=Path("out/sky_split"), help="结果输出目录")
-    parser.add_argument("--web", type=Path, default=Path("web/sky_split.json"), help="前端数据输出路径")
-    parser.add_argument("--no-web", action="store_true", help="不写前端数据")
+    parser.add_argument("--out", type=Path, default=BASE / "out" / "sky_split", help="结果输出目录")
+    parser.add_argument("--json", type=Path, default=BASE / "out" / "sky_split.json",
+                        help="可视化导出数据输出路径")
+    parser.add_argument("--no-json", action="store_true", help="不写可视化导出数据")
     parser.add_argument("--print", dest="print_summary", action="store_true", help="打印关键指标")
     args = parser.parse_args(argv)
 
@@ -1448,10 +1451,10 @@ def main(argv: list[str] | None = None) -> int:
         windows=tuple(sorted(set(args.window))),
         rotation_step=args.rot_step,
     )
-    summary = write_outputs(result, args.out, None if args.no_web else args.web)
+    summary = write_outputs(result, args.out, None if args.no_json else args.json)
     print(f"已写出 {args.out}/summary.json、satellites.csv、labels.csv、curves.csv")
-    if not args.no_web:
-        print(f"已写出 {args.web}")
+    if not args.no_json:
+        print(f"已写出 {args.json}")
     if args.print_summary:
         _print_summary(summary)
     return 0

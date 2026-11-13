@@ -315,7 +315,7 @@ function viewCenterFor(source) {
 }
 
 /* ------------------------------------------------------------------ *
- * 解析器（与 Python 版 nmea_parser.py 行为一致）
+ * 浏览器端 NMEA 解析器
  * ------------------------------------------------------------------ */
 const SENTENCE_RE = /^\$([^*]*)(?:\*([0-9A-Fa-f]{2}))?$/;
 
@@ -748,7 +748,7 @@ const state = {
   styleFrame: null,
   pendingStyleLayers: new Set(),
   pendingRender: false,
-  split: null,          // sky_split.py 生成的遮挡分割（逐历元曲线 + 逐星概率）
+  split: null,          // 可选 sky_split.json：遮挡分割（逐历元曲线 + 逐星概率）
   compare: {
     open: false,
     metrics: DEFAULT_COMPARE_METRICS.slice(),
@@ -3200,8 +3200,8 @@ function resetLayerStyle() {
  * 星空图
  * ------------------------------------------------------------------ */
 /**
- * sky_split.py 先生成 `web/sky_split.json`：每个历元两条边界曲线
- * （半宽随仰角变化）以及每颗卫星的直射概率。这里把它画成
+ * 可选的 `sky_split.json`：每个历元两条边界曲线（半宽随仰角变化）以及
+ * 每颗卫星的直射概率。它不是页面运行的必要文件；存在时把星空图叠加成
  *  - 直射带填充（青色扇形）
  *  - 东 / 西两条边界曲线（实线 = 当前历元，虚线 = 全程估计）
  *  - 判为非直射卫星的红色圆环
@@ -4669,7 +4669,7 @@ function buildWindowChips(win) {
     },
     {
       label: '遮挡分割',
-      title: '叠加 sky_split.py 生成的直射带与非直射判定（需要 web/sky_split.json）',
+      title: '叠加可选的 sky_split.json 直射带与非直射判定',
       active: () => dataset.showSplit !== false,
       toggle: () => { dataset.showSplit = dataset.showSplit === false; },
     },
@@ -4950,7 +4950,7 @@ async function loadFileFromUrl(name) {
   }
 }
 
-/** 读取 sky_split.py 生成的分割数据；没有该文件时静默降级为纯星空图。 */
+/** 读取可选的 sky_split.json；没有该文件时静默降级为纯星空图。 */
 async function loadSplitData() {
   try {
     const response = await fetch('/sky_split.json', { cache: 'no-store' });
@@ -7108,7 +7108,7 @@ function init() {
 
   if (location.protocol === 'file:') {
     toast('当前以 file:// 打开，浏览器会阻止读取本地文件与地图瓦片；'
-      + '请运行 python serve.py 后访问 http://localhost:8000/ 。', true);
+      + '请用 npm start 启动本项目自带的服务器后访问终端里显示的地址。', true);
     return;
   }
 

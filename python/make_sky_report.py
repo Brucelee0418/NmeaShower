@@ -6,7 +6,6 @@
 
 图里的数据全部来自 :mod:`sky_split` 的真实运行结果，不手工填数。
 """
-
 from __future__ import annotations
 
 import argparse
@@ -26,7 +25,8 @@ from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 
 import sky_split as ss
 
-OUT_DIR = Path("docs/sky")
+BASE = Path(__file__).resolve().parent
+OUT_DIR = BASE / "docs" / "sky"
 CN0_CMAP = LinearSegmentedColormap.from_list(
     "cn0", ["#b91c1c", "#f59e0b", "#84cc16", "#15803d"]
 )
@@ -848,7 +848,7 @@ def figure_pipeline(result: ss.SkySplitResult) -> None:
     box(9.15, 3.35, 3.4, 2.05, "⑥ 输出",
         "天空分割掩膜（直射 / 遮挡）\n"
         "逐星直射概率与硬标签\n"
-        "web/sky_split.json → 星空图叠加\n"
+        "out/sky_split.json → 查看器叠加\n"
         "CSV / summary.json 全部指标",
         "#ffe4e6")
 
@@ -897,7 +897,8 @@ FIGURES = {
 }
 
 
-def feature_ablation(result: ss.SkySplitResult, out_dir: Path = Path("out/sky_split")) -> list[dict]:
+def feature_ablation(result: ss.SkySplitResult, out_dir: Path | None = None) -> list[dict]:
+    out_dir = BASE / "out" / "sky_split" if out_dir is None else out_dir
     """特征消融：固定 GMM 其余设置，只换聚类特征，看弱星被误判为直射的比例。
 
     结果写成 ``out/sky_split/feature_ablation.json``，报告里的表直接引用它。
@@ -957,7 +958,7 @@ def feature_ablation(result: ss.SkySplitResult, out_dir: Path = Path("out/sky_sp
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="生成 sky_split.md 的插图")
     parser.add_argument("--only", type=int, nargs="*", help="只画指定编号的图")
-    parser.add_argument("--input", default="nmea.log")
+    parser.add_argument("--input", type=Path, default=BASE / "nmea.log")
     parser.add_argument("--ablation", action="store_true", help="额外运行特征消融实验")
     args = parser.parse_args(argv)
 

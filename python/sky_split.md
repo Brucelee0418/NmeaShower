@@ -4,7 +4,7 @@
 >
 > - 算法实现：[`sky_split.py`](sky_split.py)（解析 → 朝向扫描 → 强星 PCA → GMM 分类 → 两条边界曲线 → 抖动 / 旋转评估）
 > - 出图脚本：[`make_sky_report.py`](make_sky_report.py)（本报告全部插图都由它按真实运行结果生成）
-> - 网页叠加：[`web/app.js`](web/app.js) + [`web/sky_split.json`](web/sky_split.json)（星空图上按时刻显示分割结果）
+> - 可视化导出：`out/sky_split.json`（逐历元边界曲线与逐星直射概率，可交给任意查看器）
 > - 结果数据：`out/sky_split/`（summary.json、labels.csv、satellites.csv、curves.csv、feature_ablation.json）
 
 ---
@@ -353,9 +353,9 @@ W_side(el, t) = k_side(t) · W_side(el)
 
 ---
 
-## 11. 网页展示：星空图上叠加分割结果
+## 11. 可视化叠加（可选）
 
-`serve.py` 不变，页面启动时额外读取 `web/sky_split.json`（由 `sky_split.py` 生成，约 386 KB），
+`sky_split.py` 只负责导出 `out/sky_split.json`（约 386 KB）。独立查看器可以读取这份数据，
 在星空图上按当前时刻叠加：
 
 - **青色扇区** = 直射带（两条边界曲线 + 地平线弧围成的区域）；
@@ -364,15 +364,14 @@ W_side(el, t) = k_side(t) · W_side(el)
 - 鼠标悬停会显示该星的 p(直射)；
 - 面板右上角的“遮挡分割”开关可以随时关掉叠加；如果打开的文件与 JSON 历元数不一致，会自动关闭并提示。
 
-![图 10 网页星空图叠加](docs/sky/fig10_web_sky.png)
+![图 10 查看器星空图叠加](docs/sky/fig10_web_sky.png)
 
-![图 11 网页整体截图](docs/sky/fig11_web_full.png)
+![图 11 查看器整体截图](docs/sky/fig11_web_full.png)
 
-启动方式：
+导出方式：
 
 ```bash
-python sky_split.py          # 生成 out/sky_split/* 与 web/sky_split.json
-python serve.py --open       # 打开 http://localhost:8000/
+python sky_split.py          # 生成 out/sky_split/* 与 out/sky_split.json
 ```
 
 ---
@@ -401,7 +400,7 @@ python -m unittest discover -s tests -v
 | `out/sky_split/labels.csv` | 18 811 条观测的窗口特征、p(直射)、硬标签 |
 | `out/sky_split/curves.csv` | 两条边界曲线（半宽与方位） |
 | `out/sky_split/feature_ablation.json` | 特征消融表 |
-| `web/sky_split.json` | 网页叠加数据（逐历元曲线 + 逐星概率） |
+| `out/sky_split.json` | 可视化导出数据（逐历元曲线 + 逐星概率） |
 | `docs/sky/*.png` | 本报告全部插图 |
 
 ---

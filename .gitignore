@@ -1,15 +1,22 @@
 # Python
 __pycache__/
 *.py[cod]
+.pytest_cache/
 
 # 运行产物
 out/
 .cache/
 .scratch/
 
-# 依赖 / 工具
+# Node
 node_modules/
 package-lock.json
+
+# 本地采集数据（不进入仓库）
+/*.log
+/*.nmea
+/*.txt
+/*.mp4
 
 # 编辑器
 .vscode/

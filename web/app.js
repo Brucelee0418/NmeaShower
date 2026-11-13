@@ -723,7 +723,6 @@ const state = {
   lockFrame: null,
   trackHover: null,          // 当前悬停的轨迹点信息
   trackHoverTimer: null,
-  trackHit: null,            // 鼠标命中的轨迹点（用于双击定位 / 暂停双击缩放）
   windowLayout: {},     // 浮窗位置：{ 'sky:文件名': {x,y,w,h} }
   resizeObserver: null,
   resizeFrame: null,
@@ -1115,8 +1114,6 @@ function mapData() {
 
 function renderMap(full = false) {
   if (!state.mapReady || full) {
-    setTrackHit(null);
-    hideTrackHover();
     const layout = mapLayout();
     Plotly.react('map', mapData(), layout, PLOT_CONFIG);
     state.mapReady = true;
@@ -1415,14 +1412,7 @@ function attachMapPointInteractions() {
     if (event.button !== 0 || state.mapDrag) return;
     hideTrackHover();
     const hit = currentMarkerAt(event);
-    if (!hit) {
-      const trackHit = trackPointAt(event);
-      // 已悬停的轨迹点优先，不要被按下时的整数像素重新命中成另一个重叠点
-      if (!state.trackHit) setTrackHit(trackHit);
-      else if (!trackHit) setTrackHit(null);
-      return;
-    }
-    setTrackHit(null);
+    if (!hit) return;
     beginMapPointDrag(event, hit);
   }, true);
 
@@ -1438,7 +1428,6 @@ function attachMapPointInteractions() {
       updateTrackHover(event);
       return;
     }
-    setTrackHit(null);
     hideTrackHover();
     setMapCursor('grab');
     const epoch = hit.dataset.epochs[hit.dataset.index] || null;
@@ -1455,7 +1444,6 @@ function attachMapPointInteractions() {
 
   element.addEventListener('pointerleave', () => {
     if (state.mapDrag) return;
-    setTrackHit(null);
     hideMapDragLabel();
     setMapCursor(mapIdleCursor());
     hideTrackHover(300);
@@ -1604,7 +1592,7 @@ function attachMeasureMapEvents() {
   map.on('resize', scheduleMeasureDraw);
   map.once('idle', scheduleMeasureDraw);
   // 测量时双击会连发两次 click，先关掉双击缩放，避免叠点和误缩放
-  syncDoubleClickZoom();
+  if (state.measure.active) map.doubleClickZoom.disable();
   scheduleMeasureDraw();
   return true;
 }
@@ -1641,27 +1629,17 @@ function setMeasuring(active) {
     return;
   }
   state.measure.active = Boolean(active);
+  const map = mapboxMap();
+  if (map) {
+    if (state.measure.active) map.doubleClickZoom.disable();
+    else map.doubleClickZoom.enable();
+  }
   if (state.measure.active) {
-    setTrackHit(null);
     hideTrackHover();
     ensureMeasureMapEvents();
   }
-  syncDoubleClickZoom();
   setMapCursor(state.measure.active ? 'crosshair' : mapIdleCursor());
   updateMeasureReadout();
-}
-
-/** 测距或悬停轨迹点时关掉双击缩放，避免双击轨迹点时地图跟着放大。 */
-function syncDoubleClickZoom() {
-  const map = mapboxMap();
-  if (!map) return;
-  if (state.measure.active || state.trackHit) map.doubleClickZoom.disable();
-  else map.doubleClickZoom.enable();
-}
-
-function setTrackHit(hit) {
-  state.trackHit = hit || null;
-  syncDoubleClickZoom();
 }
 
 function applyMeasureWindowPos() {
@@ -1711,8 +1689,8 @@ function resetMeasurement() {
   if (state.measure.open) setMeasureWindowOpen(false);
   state.measure.points = [];
   state.measure.active = false;
-  setTrackHit(null);
-  syncDoubleClickZoom();
+  const map = mapboxMap();
+  if (map) map.doubleClickZoom.enable();
   renderMeasureOverlay();
   updateMeasureReadout();
   setMapCursor('');
@@ -1944,14 +1922,14 @@ function attachMarkerMapEvents() {
     scheduleLockPosition();
   };
   map.on('move', () => {
-    setTrackHit(null);
     hideTrackHover();
     onViewChange();
   });
   map.on('resize', onViewChange);
-  map.on('dblclick', onMapDoubleClick);
   map.once('idle', onViewChange);
-  syncDoubleClickZoom();
+  // Plotly 的 Mapbox 子图默认不带双击缩放，这里恢复地图的常规行为；测距时仍关闭
+  if (state.measure.active) map.doubleClickZoom.disable();
+  else map.doubleClickZoom.enable();
   onViewChange();
   return true;
 }
@@ -2001,6 +1979,14 @@ function lockErrorText(info) {
   return error === null ? '基准无覆盖' : `${fmt(error, 2)} m`;
 }
 
+/** 悬停卡片上的「切换此点」：把当前时刻切到该轨迹点。 */
+function switchToTrackPoint(info) {
+  if (!info) return;
+  const seconds = datasetOffset(info.dataset) + info.dataset.times[info.epochIndex];
+  if (!Number.isFinite(seconds)) return;
+  seekTo(seconds, { followWindow: false });
+}
+
 function addLockRow(card, label, value) {
   const row = document.createElement('div');
   row.className = 'map-lock-row';
@@ -2035,15 +2021,21 @@ function buildLockCard(card, info, locked, onAction) {
   addLockRow(card, '时间', info.timeText);
   const errorText = lockErrorText(info);
   if (errorText !== null) addLockRow(card, '误差', errorText);
-  if (!locked) {
-    const hint = document.createElement('div');
-    hint.className = 'map-lock-hint';
-    hint.textContent = '双击轨迹点定位到该时刻';
-    card.appendChild(hint);
-  }
 
   const actions = document.createElement('div');
   actions.className = 'map-lock-actions';
+  if (!locked) {
+    const switchButton = document.createElement('button');
+    switchButton.type = 'button';
+    switchButton.className = 'map-lock-action';
+    switchButton.textContent = '切换此点';
+    switchButton.title = '把当前时刻切换到该轨迹点';
+    switchButton.addEventListener('click', (event) => {
+      event.stopPropagation();
+      switchToTrackPoint(info);
+    });
+    actions.appendChild(switchButton);
+  }
   const action = document.createElement('button');
   action.type = 'button';
   action.className = locked ? 'map-lock-action' : 'map-lock-action primary';
@@ -2069,9 +2061,7 @@ function positionLockItem(item, lat, lon, map, dx, dy, width) {
   item.hidden = false;
   item.style.left = `${x}px`;
   item.style.top = `${y}px`;
-  const card = item.querySelector('.map-lock-card');
-  const cardHeight = card ? card.offsetHeight : 88;
-  item.classList.toggle('below', y < cardHeight + 18);
+  item.classList.toggle('below', y < 104);
   const half = 112;
   let shift = 0;
   if (x < half) shift = half - x;
@@ -2233,11 +2223,14 @@ function epochIndexForTrack(dataset, trackIndex) {
   return -1;
 }
 
-function trackPointAtPoint(px, py) {
+function trackPointAt(event) {
   if (!state.mapReady || state.measure.active || state.mapDrag) return null;
   if (!layerStyle('track').visible) return null;
   const map = mapboxMap();
   if (!map) return null;
+  const rect = map.getContainer().getBoundingClientRect();
+  const px = event.clientX - rect.left;
+  const py = event.clientY - rect.top;
   let best = null;
   for (const dataset of state.datasets) {
     if (!dataset.visible) continue;
@@ -2259,13 +2252,6 @@ function trackPointAtPoint(px, py) {
     }
   }
   return best;
-}
-
-function trackPointAt(event) {
-  const map = mapboxMap();
-  if (!map) return null;
-  const rect = map.getContainer().getBoundingClientRect();
-  return trackPointAtPoint(event.clientX - rect.left, event.clientY - rect.top);
 }
 
 function showTrackHover(info) {
@@ -2306,24 +2292,20 @@ function hideTrackHover(delay = 0) {
 
 function updateTrackHover(event) {
   if (state.measure.active || state.mapDrag) {
-    setTrackHit(null);
     hideTrackHover();
     return;
   }
   const hit = trackPointAt(event);
   if (!hit) {
-    setTrackHit(null);
     hideTrackHover(220);
     return;
   }
-  setTrackHit(hit);
   if (state.locks.some((lock) => lock.key === `${hit.dataset.id}:${hit.epochIndex}`)) {
     hideTrackHover();
     return;
   }
   const info = lockInfoFor(hit.dataset, hit.epochIndex);
   if (!info) {
-    setTrackHit(null);
     hideTrackHover();
     return;
   }
@@ -2333,31 +2315,6 @@ function updateTrackHover(event) {
     return;
   }
   showTrackHover(info);
-}
-
-/** 双击悬停的轨迹点：把当前时刻切到该点（双击缩放已在悬停时关闭）。 */
-function onMapDoubleClick(event) {
-  if (state.measure.active) return;
-  const map = mapboxMap();
-  if (!map) return;
-  let px = event.point ? event.point.x : NaN;
-  let py = event.point ? event.point.y : NaN;
-  if (!Number.isFinite(px) && event.originalEvent) {
-    const rect = map.getContainer().getBoundingClientRect();
-    px = event.originalEvent.clientX - rect.left;
-    py = event.originalEvent.clientY - rect.top;
-  }
-  if (!Number.isFinite(px) || !Number.isFinite(py)) return;
-  const rect = map.getContainer().getBoundingClientRect();
-  if (currentMarkerAt({ clientX: rect.left + px, clientY: rect.top + py })) return;
-  // 优先用悬停时命中的点：轨迹自重叠时，按下 / 双击的整数像素可能落到相邻点
-  const hit = state.trackHit || trackPointAtPoint(px, py);
-  if (!hit) return;
-  setTrackHit(hit);
-  const seconds = datasetOffset(hit.dataset) + hit.dataset.times[hit.epochIndex];
-  if (!Number.isFinite(seconds)) return;
-  hideTrackHover();
-  seekTo(seconds, { followWindow: false });
 }
 
 /* ------------------------------------------------------------------ *
@@ -2974,7 +2931,6 @@ function buildDatasetLegend() {
       rememberDatasetStyle(dataset);
       row.classList.toggle('off', !dataset.visible);
       renderMap(true);
-      setTrackHit(null);
       hideTrackHover();
       scheduleLockPosition();
       updateMapInfo();
@@ -3149,10 +3105,7 @@ function applyLayerStyle(layer) {
   const style = layerStyle(layer);
   // 轨迹点 / 起点 / 终点 / 当前位置由 canvas 覆盖层绘制，Plotly trace 始终隐藏
   if (layer === 'track') {
-    if (!style.visible) {
-      setTrackHit(null);
-      hideTrackHover();
-    }
+    if (!style.visible) hideTrackHover();
     scheduleMarkerBase();
     scheduleLegendWindow();
     return;
@@ -4211,7 +4164,6 @@ function scheduleWindowApply() {
  */
 function syncTrackWindow() {
   if (!state.mapReady || !state.datasets.length) return;
-  setTrackHit(null);
   hideTrackHover();
   const indices = [];
   const lon = [];
@@ -4824,7 +4776,6 @@ function removeDataset(id) {
     state.locks = state.locks.filter((lock) => lock.datasetId !== id);
     renderLockCards();
   }
-  setTrackHit(null);
   hideTrackHover();
   if (state.focusId === id) {
     state.focusId = state.datasets.length ? state.datasets[0].id : null;
@@ -6141,7 +6092,6 @@ function bindEvents() {
   dom.mapStyle.addEventListener('change', () => {
     state.mapSource = dom.mapStyle.value;
     state.mapReady = false;
-    setTrackHit(null);
     hideTrackHover();
     // 直接改 raster layer 会撞上 mapbox 的 "Style is not done loading"，
     // 因此先拆掉地图容器，再在下一帧重建

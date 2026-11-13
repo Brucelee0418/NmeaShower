@@ -218,7 +218,7 @@ const SAT_BAND_ORDER = [
   'L1', 'L2', 'L5', 'G1', 'G2', 'E1', 'E5a', 'E5b', 'E5', 'E6',
   'B1I', 'B1C', 'B1Q', 'B2I', 'B2a', 'B2b', 'B3I', 'B3Q', '默认',
 ];
-const SAT_DATASET_DASH = ['solid', 'dot'];
+const SAT_DATASET_DASH = ['solid', '2px,5px'];
 const SAT_DEFAULT_WIDTH = 640;
 const SAT_DEFAULT_HEIGHT = 500;
 const SAT_MIN_WIDTH = 380;
@@ -6119,9 +6119,10 @@ function satelliteCurveColor(system, band, bands) {
 
 /** 数据集只用实线 / 点线；数据更多时加粗，避免回到虚线。 */
 function satelliteDatasetStyle(index) {
+  const dotted = index % SAT_DATASET_DASH.length === 1;
   return {
     dash: SAT_DATASET_DASH[index % SAT_DATASET_DASH.length],
-    width: 1.5 + Math.floor(index / SAT_DATASET_DASH.length) * 0.7,
+    width: (dotted ? 2 : 1.5) + Math.floor(index / SAT_DATASET_DASH.length) * 0.7,
   };
 }
 
@@ -6535,7 +6536,10 @@ function satelliteFigure(metric, datasets, systems, bands) {
           if (!series.y.some((value) => value !== null)) continue;
           const style = datasets.length > 1
             ? datasetStyle
-            : { dash: bandIndex % 2 === 0 ? 'solid' : 'dot', width: 1.5 };
+            : {
+              dash: bandIndex % 2 === 0 ? 'solid' : SAT_DATASET_DASH[1],
+              width: bandIndex % 2 === 0 ? 1.5 : 2,
+            };
           data.push({
             type: 'scatter',
             mode: 'lines',

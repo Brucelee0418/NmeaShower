@@ -218,8 +218,8 @@ body {
 .timeline-handle:hover,
 .timeline-handle:focus-visible { background: #e0f2fe; outline: none; }
 
-.timeline-handle.left { left: -5px; }
-.timeline-handle.right { right: -5px; }
+.timeline-handle.left { left: -4.5px; }
+.timeline-handle.right { right: -4.5px; }
 
 /* 当前时刻游标：圆形把手在轨道上方，竖线压过轨道；
    z-index 低于两端标尺，贴着标尺时优先让标尺可拖。
@@ -246,7 +246,7 @@ body {
   top: 14px;
   bottom: 0;
   width: 3px;
-  margin-left: -1.5px;
+  translate: -50% 0;
   border-radius: 1.5px;
   background: #f59e0b;
   box-shadow: 0 0 6px rgba(245, 158, 11, 0.9);
@@ -260,7 +260,7 @@ body {
   box-sizing: border-box;
   width: 14px;
   height: 14px;
-  margin-left: -7px;
+  translate: -50% 0;
   border-radius: 50%;
   background: #f59e0b;
   border: 2px solid #ffffff;

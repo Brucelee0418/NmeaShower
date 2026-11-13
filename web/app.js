@@ -2960,7 +2960,6 @@ function buildDatasetLegend() {
       renderMap(true);
       hideTrackHover();
       scheduleLockPosition();
-      updateMapInfo();
       buildCompareChips();
       renderCompare();
     });
@@ -4695,21 +4694,6 @@ function buildWindowChips(win) {
 /* ------------------------------------------------------------------ *
  * 数据装载
  * ------------------------------------------------------------------ */
-function updateMapInfo() {
-  if (!state.datasets.length) {
-    dom.mapInfo.textContent = '';
-    return;
-  }
-  const lines = state.datasets.slice(0, 4).map((dataset) => {
-    const summary = dataset.summary;
-    const duration = summary.duration === undefined ? '—' : `${summary.duration.toFixed(1)} s`;
-    return `<span style="color:${dataset.color}">■</span> ${dataset.name}`
-      + `：${summary.epochs} 历元 / ${duration} / ${summary.distance.toFixed(1)} m`
-      + ` / 最大 ${summary.maxSpeedKmh.toFixed(2)} km/h`;
-  });
-  if (state.datasets.length > 4) lines.push(`…另有 ${state.datasets.length - 4} 条数据`);
-  dom.mapInfo.innerHTML = lines.join('<br>');
-}
 
 /* ---------------- 数据集增删与切换 ---------------- */
 function updateControlState() {
@@ -4806,7 +4790,6 @@ function addDataset(text, name) {
   buildDatasetLegend();
   buildLayerLegend();
   buildCompareChips();
-  updateMapInfo();
   updateControlState();
   renderMap(true);
   renderEpoch();
@@ -4874,7 +4857,6 @@ function removeDataset(id) {
     renderLockCards();
     buildDatasetLegend();
     buildLayerLegend();
-    updateMapInfo();
     updateControlState();
     dom.epochLabel.textContent = '未加载数据';
     dom.epochLabel.classList.remove('warn');
@@ -4892,7 +4874,6 @@ function removeDataset(id) {
   rebuildTimeline();
   buildDatasetLegend();
   buildLayerLegend();
-  updateMapInfo();
   renderMap(true);
   renderEpoch();
   renderCompare();
@@ -6783,7 +6764,6 @@ function cacheDom() {
   dom.timelineReset = document.getElementById('timeline-reset');
   dom.timelinePresets = Array.from(document.querySelectorAll('.preset[data-minutes]'));
   dom.epochLabel = document.getElementById('epoch-label');
-  dom.mapInfo = document.getElementById('map-info');
   dom.mapDragLabel = document.getElementById('map-drag-label');
   dom.markerBaseOverlay = document.getElementById('marker-base-overlay');
   dom.markerCurrentOverlay = document.getElementById('marker-current-overlay');
